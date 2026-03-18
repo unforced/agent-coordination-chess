@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/server.ts",
-    "dev:client": "cd client && vite",
-    "build": "cd client && vite build",
+    "dev:client": "cd client && npx vite",
+    "build": "cd client && npx vite build",
     "start": "tsx server/server.ts"
   },
   "dependencies": {
