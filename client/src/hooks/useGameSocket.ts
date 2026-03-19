@@ -240,7 +240,11 @@ export function useGameSocket(
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket("ws://localhost:3001");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsHost = window.location.hostname === "localhost"
+      ? "localhost:3001"
+      : window.location.host;
+    const ws = new WebSocket(`${wsProtocol}//${wsHost}`);
     wsRef.current = ws;
 
     ws.onopen = () => {

@@ -1,3 +1,4 @@
+import path from "path";
 import express from "express";
 import cors from "cors";
 import { createServer } from "http";
@@ -131,8 +132,12 @@ function createDefaultGameConfig(): GameConfig {
 // ── Express App ──────────────────────────────────────────────────────
 
 const app = express();
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(cors());
 app.use(express.json());
+
+// Serve built client in production
+const clientDist = path.join(process.cwd(), "client", "dist");
+app.use(express.static(clientDist));
 
 // Single game (no series)
 app.post("/api/games", (_req, res) => {
@@ -251,9 +256,14 @@ app.get("/api/personalities", (_req, res) => {
   })));
 });
 
+// SPA fallback — serve index.html for non-API routes
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(clientDist, "index.html"));
+});
+
 // ── HTTP + WebSocket Server ──────────────────────────────────────────
 
-const PORT = 3001;
+const PORT = parseInt(process.env.PORT || "3001", 10);
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
