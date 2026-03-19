@@ -1,13 +1,11 @@
 import fs from "fs";
 import path from "path";
 import type {
-  SeriesConfig,
-  SeriesState,
-  IndividualNotepad,
-  TeamNotepad,
-  GameResult,
+  AgentProfile,
+  GameNotepad,
   MoveRecord,
   Team,
+  ArenaState,
 } from "../shared/types.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -32,106 +30,73 @@ function readJson<T>(filePath: string): T | null {
   }
 }
 
-function seriesDir(seriesId: string): string {
-  return path.join(DATA_DIR, "series", seriesId);
+// ── Agent Profiles ───────────────────────────────────────────────────
+
+function agentDir(agentName: string): string {
+  return path.join(DATA_DIR, "agents", agentName);
 }
 
-// ── Series ───────────────────────────────────────────────────────────
-
-export function createSeriesDir(seriesId: string): void {
-  const dir = seriesDir(seriesId);
-  ensureDir(path.join(dir, "notepads", "individual"));
-  ensureDir(path.join(dir, "notepads", "team"));
-  ensureDir(path.join(dir, "games"));
+export function saveAgentProfile(profile: AgentProfile): void {
+  writeJson(path.join(agentDir(profile.name), "profile.json"), profile);
 }
 
-export function saveSeriesConfig(seriesId: string, config: SeriesConfig): void {
-  writeJson(path.join(seriesDir(seriesId), "config.json"), config);
+export function loadAgentProfile(agentName: string): AgentProfile | null {
+  return readJson<AgentProfile>(path.join(agentDir(agentName), "profile.json"));
 }
 
-export function loadSeriesConfig(seriesId: string): SeriesConfig | null {
-  return readJson<SeriesConfig>(path.join(seriesDir(seriesId), "config.json"));
-}
+// ── Game Notepads ────────────────────────────────────────────────────
 
-export function saveSeriesState(seriesId: string, state: SeriesState): void {
-  writeJson(path.join(seriesDir(seriesId), "state.json"), state);
-}
-
-export function loadSeriesState(seriesId: string): SeriesState | null {
-  return readJson<SeriesState>(path.join(seriesDir(seriesId), "state.json"));
-}
-
-// ── Notepads ─────────────────────────────────────────────────────────
-
-export function saveIndividualNotepad(
-  seriesId: string,
-  agentName: string,
-  notepad: IndividualNotepad
-): void {
+export function saveGameNotepad(agentName: string, notepad: GameNotepad): void {
   writeJson(
-    path.join(seriesDir(seriesId), "notepads", "individual", `${agentName}.json`),
+    path.join(agentDir(agentName), "notepads", `game-${notepad.gameNumber}.json`),
     notepad
   );
 }
 
-export function loadIndividualNotepad(
-  seriesId: string,
-  agentName: string
-): IndividualNotepad | null {
-  return readJson<IndividualNotepad>(
-    path.join(seriesDir(seriesId), "notepads", "individual", `${agentName}.json`)
-  );
-}
+export function loadRecentNotepads(agentName: string, limit = 10): GameNotepad[] {
+  const dir = path.join(agentDir(agentName), "notepads");
+  ensureDir(dir);
 
-export function saveTeamNotepad(
-  seriesId: string,
-  team: Team,
-  notepad: TeamNotepad
-): void {
-  writeJson(
-    path.join(seriesDir(seriesId), "notepads", "team", `${team}.json`),
-    notepad
-  );
-}
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.startsWith("game-") && f.endsWith(".json"))
+      .sort((a, b) => {
+        const numA = parseInt(a.replace("game-", "").replace(".json", ""));
+        const numB = parseInt(b.replace("game-", "").replace(".json", ""));
+        return numB - numA; // newest first
+      })
+      .slice(0, limit);
 
-export function loadTeamNotepad(
-  seriesId: string,
-  team: Team
-): TeamNotepad | null {
-  return readJson<TeamNotepad>(
-    path.join(seriesDir(seriesId), "notepads", "team", `${team}.json`)
-  );
+    return files
+      .map((f) => readJson<GameNotepad>(path.join(dir, f)))
+      .filter((n): n is GameNotepad => n !== null);
+  } catch {
+    return [];
+  }
 }
 
 // ── Game Results ─────────────────────────────────────────────────────
 
-export function saveGameResult(
-  seriesId: string,
-  gameIndex: number,
-  result: GameResult
-): void {
+export function saveGameMoves(gameNumber: number, moves: MoveRecord[]): void {
   writeJson(
-    path.join(seriesDir(seriesId), "games", String(gameIndex), "result.json"),
-    result
-  );
-}
-
-export function saveGameMoves(
-  seriesId: string,
-  gameIndex: number,
-  moves: MoveRecord[]
-): void {
-  writeJson(
-    path.join(seriesDir(seriesId), "games", String(gameIndex), "moves.json"),
+    path.join(DATA_DIR, "games", String(gameNumber), "moves.json"),
     moves
   );
 }
 
-export function loadGameResult(
-  seriesId: string,
-  gameIndex: number
-): GameResult | null {
-  return readJson<GameResult>(
-    path.join(seriesDir(seriesId), "games", String(gameIndex), "result.json")
+export function saveGameResult(gameNumber: number, result: unknown): void {
+  writeJson(
+    path.join(DATA_DIR, "games", String(gameNumber), "result.json"),
+    result
   );
+}
+
+// ── Arena State ──────────────────────────────────────────────────────
+
+export function saveArenaState(state: ArenaState): void {
+  writeJson(path.join(DATA_DIR, "arena.json"), state);
+}
+
+export function loadArenaState(): ArenaState | null {
+  return readJson<ArenaState>(path.join(DATA_DIR, "arena.json"));
 }

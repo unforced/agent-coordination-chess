@@ -288,6 +288,13 @@ body {
   overflow: hidden;
 }
 
+.game-layout__profile {
+  width: 350px;
+  min-width: 350px;
+  border-left: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
 .game-layout__bottom {
   flex-shrink: 0;
   height: 250px;
@@ -769,6 +776,120 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ── Agent Profile Panel ──────────────────────────────────────────── */
+.agent-profile {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-secondary);
+}
+
+.agent-profile__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.agent-profile__name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.agent-profile__close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.agent-profile__close:hover {
+  color: var(--text-primary);
+}
+
+.agent-profile__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.agent-profile__section {
+  margin-bottom: 16px;
+}
+
+.agent-profile__section--stream {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+}
+
+.agent-profile__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.agent-profile__content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-profile__stream {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+}
+
+/* ── Post-game message styles ────────────────────────────────────── */
+.message--postgame {
+  background: rgba(168, 85, 247, 0.1);
+  border-left: 2px solid var(--model-opus);
+}
+
+.game-feed__team-tag--postgame {
+  background: rgba(168, 85, 247, 0.15);
+  color: var(--model-opus);
+}
+
+.game-feed__phase-banner {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--text-muted);
+  padding: 8px;
+  margin: 8px 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 /* ── Eval Bar ─────────────────────────────────────────────────────── */

@@ -4,8 +4,8 @@ import type {
   GameConfig,
   BoardMessage,
   ServerEvent,
-  ClientEvent,
-  SeriesState,
+  ArenaState,
+  AgentProfile,
   Team,
 } from "../../../shared/types";
 
@@ -15,101 +15,67 @@ export interface AgentThinking {
   content: string;
 }
 
-interface UseGameSocketReturn {
-  gameState: GameState | null;
-  gameConfig: GameConfig | null;
-  messages: { white: BoardMessage[]; black: BoardMessage[] };
-  agentStreams: Record<string, AgentThinking>;
-  connected: boolean;
-  activeAgentId: string | null;
-  activeAgentName: string | null;
-  evalScore: { score: number; mate: number | null } | null;
-  subscribe: (gameId: string) => void;
-  subscribeSeries: (seriesId: string) => void;
-}
-
 function dedupeMessages(msgs: BoardMessage[]): BoardMessage[] {
   const seen = new Set<string>();
-  return msgs.filter((m) => {
-    if (seen.has(m.id)) return false;
-    seen.add(m.id);
-    return true;
-  });
+  return msgs.filter((m) => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
 }
 
-export function useGameSocket(
-  onSeriesState?: (state: SeriesState) => void
-): UseGameSocketReturn {
+export function useGameSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  const gameIdRef = useRef<string | null>(null);
-  const seriesIdRef = useRef<string | null>(null);
   const currentTurnRef = useRef<Team>("white");
 
   const [gameState, setGameState] = useState<GameState | null>(null);
-  const [messages, setMessages] = useState<{
-    white: BoardMessage[];
-    black: BoardMessage[];
-  }>({ white: [], black: [] });
-  const [agentStreams, setAgentStreams] = useState<
-    Record<string, AgentThinking>
-  >({});
   const [gameConfig, setGameConfig] = useState<GameConfig | null>(null);
+  const [arenaState, setArenaState] = useState<ArenaState | null>(null);
+  const [messages, setMessages] = useState<{ white: BoardMessage[]; black: BoardMessage[] }>({ white: [], black: [] });
+  const [postGameMessages, setPostGameMessages] = useState<BoardMessage[]>([]);
+  const [agentStreams, setAgentStreams] = useState<Record<string, AgentThinking>>({});
   const [connected, setConnected] = useState(false);
-  const [evalScore, setEvalScore] = useState<{ score: number; mate: number | null } | null>(null);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [activeAgentName, setActiveAgentName] = useState<string | null>(null);
-
-  const send = useCallback((event: ClientEvent) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(event));
-    }
-  }, []);
+  const [evalScore, setEvalScore] = useState<{ score: number; mate: number | null } | null>(null);
+  const [agentProfiles, setAgentProfiles] = useState<Record<string, AgentProfile>>({});
 
   const handleEvent = useCallback((event: ServerEvent) => {
     switch (event.type) {
+      case "game:config": {
+        setGameConfig(event.payload);
+        break;
+      }
+
       case "game:state": {
         const state = event.payload;
         currentTurnRef.current = state.currentTurn;
         setGameState(state);
 
-        // Only rebuild messages for a fresh game (turn 1, no history yet in our state)
-        // This avoids wiping incremental updates mid-game
         const white: BoardMessage[] = [];
         const black: BoardMessage[] = [];
         for (const move of state.moveHistory) {
-          if (move.team === "white") {
-            white.push(...move.deliberation.messages);
-          } else {
-            black.push(...move.deliberation.messages);
-          }
+          (move.team === "white" ? white : black).push(...move.deliberation.messages);
         }
         if (state.deliberation) {
-          const currentMsgs = state.deliberation.messages;
-          if (state.deliberation.team === "white") {
-            white.push(...currentMsgs);
-          } else {
-            black.push(...currentMsgs);
-          }
+          (state.deliberation.team === "white" ? white : black).push(...state.deliberation.messages);
         }
         setMessages({ white: dedupeMessages(white), black: dedupeMessages(black) });
 
-        // Only clear streams on new game, not on every state update
         if (state.turnNumber === 1 && state.moveHistory.length === 0) {
           setAgentStreams({});
+          setPostGameMessages([]);
+          setEvalScore(null);
         }
         break;
       }
 
       case "game:phase": {
-        setGameState((prev) => {
-          if (!prev) return prev;
-          return { ...prev, phase: event.payload.phase };
-        });
+        setGameState((prev) => prev ? { ...prev, phase: event.payload.phase } : prev);
         if (event.payload.phase === "deliberation" && event.payload.team) {
           currentTurnRef.current = event.payload.team;
           setActiveAgentId(null);
           setActiveAgentName(null);
+        }
+        if (event.payload.phase === "post_game_reflection") {
+          setPostGameMessages([]);
         }
         break;
       }
@@ -119,21 +85,15 @@ export function useGameSocket(
         const team = currentTurnRef.current;
         setMessages((prev) => {
           if (prev[team].some((m) => m.id === msg.id)) return prev;
-          return {
-            ...prev,
-            [team]: [...prev[team], msg],
-          };
+          return { ...prev, [team]: [...prev[team], msg] };
         });
-        setGameState((prev) => {
-          if (!prev || !prev.deliberation) return prev;
-          if (prev.deliberation.messages.some((m) => m.id === msg.id)) return prev;
-          return {
-            ...prev,
-            deliberation: {
-              ...prev.deliberation,
-              messages: [...prev.deliberation.messages, msg],
-            },
-          };
+        break;
+      }
+
+      case "postgame:message": {
+        setPostGameMessages((prev) => {
+          if (prev.some((m) => m.id === event.payload.id)) return prev;
+          return [...prev, event.payload];
         });
         break;
       }
@@ -141,28 +101,11 @@ export function useGameSocket(
       case "deliberation:active_agent": {
         setActiveAgentId(event.payload.agentId);
         setActiveAgentName(event.payload.agentName);
-        setGameState((prev) => {
-          if (!prev || !prev.deliberation) return prev;
-          return {
-            ...prev,
-            deliberation: {
-              ...prev.deliberation,
-              activeAgentId: event.payload.agentId,
-            },
-          };
-        });
         break;
       }
 
       case "clock:tick": {
-        setGameState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            clockWhite: event.payload.clockWhite,
-            clockBlack: event.payload.clockBlack,
-          };
-        });
+        setGameState((prev) => prev ? { ...prev, clockWhite: event.payload.clockWhite, clockBlack: event.payload.clockBlack } : prev);
         break;
       }
 
@@ -170,59 +113,31 @@ export function useGameSocket(
         const move = event.payload;
         const nextTurn: Team = move.team === "white" ? "black" : "white";
         currentTurnRef.current = nextTurn;
-        setGameState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            fen: move.fen,
-            moveHistory: [...prev.moveHistory, move],
-            turnNumber: move.turnNumber + 1,
-            currentTurn: nextTurn,
-            phase: "deliberation",
-            deliberation: null,
-          };
-        });
+        setGameState((prev) => prev ? {
+          ...prev, fen: move.fen, moveHistory: [...prev.moveHistory, move],
+          turnNumber: move.turnNumber + 1, currentTurn: nextTurn, phase: "deliberation", deliberation: null,
+        } : prev);
         setActiveAgentId(null);
         setActiveAgentName(null);
         break;
       }
 
       case "game:complete": {
-        setGameState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            phase: "complete",
-            winner: event.payload.winner,
-          };
-        });
+        setGameState((prev) => prev ? { ...prev, phase: "complete", winner: event.payload.winner } : prev);
         setActiveAgentId(null);
         setActiveAgentName(null);
         break;
       }
 
       case "agent:thinking": {
-        setAgentStreams((prev) => {
-          const existing = prev[event.payload.agentId];
-          return {
-            ...prev,
-            [event.payload.agentId]: {
-              agentId: event.payload.agentId,
-              agentName: event.payload.agentName,
-              content: (existing?.content || "") + event.payload.content,
-            },
-          };
-        });
-        break;
-      }
-
-      case "game:config": {
-        setGameConfig(event.payload);
-        break;
-      }
-
-      case "series:state": {
-        onSeriesState?.(event.payload);
+        setAgentStreams((prev) => ({
+          ...prev,
+          [event.payload.agentId]: {
+            agentId: event.payload.agentId,
+            agentName: event.payload.agentName,
+            content: (prev[event.payload.agentId]?.content || "") + event.payload.content,
+          },
+        }));
         break;
       }
 
@@ -231,100 +146,46 @@ export function useGameSocket(
         break;
       }
 
-      case "notepad:updated": {
+      case "arena:state": {
+        setArenaState(event.payload);
+        break;
+      }
+
+      case "agent:profile": {
+        setAgentProfiles((prev) => ({ ...prev, [event.payload.name]: event.payload }));
         break;
       }
     }
-  }, [onSeriesState]);
+  }, []);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsHost = window.location.hostname === "localhost"
-      ? "localhost:3001"
-      : window.location.host;
+    const wsHost = window.location.hostname === "localhost" ? "localhost:3001" : window.location.host;
     const ws = new WebSocket(`${wsProtocol}//${wsHost}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      setConnected(true);
-      if (seriesIdRef.current) {
-        ws.send(JSON.stringify({
-          type: "series:subscribe",
-          payload: { seriesId: seriesIdRef.current },
-        }));
-      } else if (gameIdRef.current) {
-        ws.send(JSON.stringify({
-          type: "game:subscribe",
-          payload: { gameId: gameIdRef.current },
-        }));
-      }
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      reconnectTimerRef.current = setTimeout(() => connect(), 2000);
-    };
-
+    ws.onopen = () => setConnected(true);
+    ws.onclose = () => { setConnected(false); reconnectTimerRef.current = setTimeout(connect, 2000); };
     ws.onerror = () => ws.close();
-
-    ws.onmessage = (ev) => {
-      try {
-        const serverEvent: ServerEvent = JSON.parse(ev.data);
-        handleEvent(serverEvent);
-      } catch {
-        // ignore malformed
-      }
-    };
+    ws.onmessage = (ev) => { try { handleEvent(JSON.parse(ev.data)); } catch {} };
   }, [handleEvent]);
 
-  const subscribe = useCallback(
-    (gameId: string) => {
-      gameIdRef.current = gameId;
-      seriesIdRef.current = null;
-      setMessages({ white: [], black: [] });
-      setAgentStreams({});
-      setGameState(null);
-      setActiveAgentId(null);
-      setActiveAgentName(null);
-      send({ type: "game:subscribe", payload: { gameId } });
-    },
-    [send]
-  );
-
-  const subscribeSeries = useCallback(
-    (seriesId: string) => {
-      seriesIdRef.current = seriesId;
-      gameIdRef.current = null;
-      setMessages({ white: [], black: [] });
-      setAgentStreams({});
-      setGameState(null);
-      setActiveAgentId(null);
-      setActiveAgentName(null);
-      send({ type: "series:subscribe", payload: { seriesId } });
-    },
-    [send]
-  );
+  const requestProfile = useCallback((agentName: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "agent:get_profile", payload: { agentName } }));
+    }
+  }, []);
 
   useEffect(() => {
     connect();
-    return () => {
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
-    };
+    return () => { if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current); wsRef.current?.close(); };
   }, [connect]);
 
   return {
-    gameState,
-    gameConfig,
-    messages,
-    agentStreams,
-    connected,
-    activeAgentId,
-    activeAgentName,
-    evalScore,
-    subscribe,
-    subscribeSeries,
+    gameState, gameConfig, arenaState, messages, postGameMessages,
+    agentStreams, connected, activeAgentId, activeAgentName,
+    evalScore, agentProfiles, requestProfile,
   };
 }

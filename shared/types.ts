@@ -29,27 +29,32 @@ export interface TeamConfig {
   agents: AgentConfig[];
 }
 
-// ── Notepads ────────────────────────────────────────────────────────
+// ── Agent Persistence ───────────────────────────────────────────────
 
-export interface IndividualNotepad {
-  agentName: string;
-  content: string; // max 500 chars
+export interface AgentProfile {
+  name: string;
+  personalityId: string;
+  selfDefinition: string;   // short, ~200 chars, rarely updated
+  strategy: string;         // ~1000 chars, updated regularly
   updatedAt: string;
 }
 
-export interface TeamNotepad {
-  team: Team;
-  content: string; // max 1000 chars
-  updatedAt: string;
+export interface GameNotepad {
+  gameNumber: number;
+  content: string;          // 500 chars per game reflection
+  createdAt: string;
 }
 
-export const INDIVIDUAL_NOTEPAD_LIMIT = 500;
-export const TEAM_NOTEPAD_LIMIT = 1000;
+export const SELF_DEFINITION_LIMIT = 200;
+export const STRATEGY_LIMIT = 1000;
+export const NOTEPAD_LIMIT = 500;
+export const MAX_NOTEPADS_VISIBLE = 10;
 
 // ── Game ─────────────────────────────────────────────────────────────
 
 export interface GameConfig {
   id: string;
+  gameNumber: number;
   white: TeamConfig;
   black: TeamConfig;
   gameTimeSec: number;
@@ -60,11 +65,13 @@ export interface GameConfig {
 export type GamePhase =
   | "waiting"
   | "deliberation"
-  | "post_game_deliberation"
+  | "post_game_reflection"  // phase 1: private reflection + post to board
+  | "post_game_discussion"  // phase 2: read board + final reflection
   | "complete";
 
 export interface GameState {
   gameId: string;
+  gameNumber: number;
   fen: string;
   moveHistory: MoveRecord[];
   currentTurn: Team;
@@ -112,42 +119,19 @@ export interface MoveRecord {
   };
 }
 
-// ── Series ──────────────────────────────────────────────────────────
+// ── Arena State (continuous play) ───────────────────────────────────
 
-export interface SeriesConfig {
-  id: string;
-  totalGames: number;
-  white: SeriesTeamConfig;
-  black: SeriesTeamConfig;
-  gameTimeSec: number;
-  agentTurnTimeSec: number;
-  createdAt: string;
-}
-
-export interface SeriesTeamConfig {
-  personalityIds: PersonalityId[];
-}
-
-export interface SeriesState {
-  seriesId: string;
-  currentGameIndex: number;
+export interface ArenaState {
+  totalGamesPlayed: number;
+  currentGameNumber: number;
   currentGameId: string | null;
-  results: GameResult[];
-  status: "in_progress" | "complete";
-}
-
-export interface GameResult {
-  gameIndex: number;
-  gameId: string;
-  winner: Team | "draw" | null;
-  totalMoves: number;
-  durationMs: number;
-  endedAt: string;
+  status: "running" | "stopped";
 }
 
 // ── WebSocket Events ────────────────────────────────────────────────
 
 export type ServerEvent =
+  | { type: "game:config"; payload: GameConfig }
   | { type: "game:state"; payload: GameState }
   | { type: "game:phase"; payload: { phase: GamePhase; team?: Team } }
   | { type: "deliberation:message"; payload: BoardMessage }
@@ -156,13 +140,12 @@ export type ServerEvent =
   | { type: "move:submitted"; payload: MoveRecord }
   | { type: "game:complete"; payload: { winner: Team | "draw" } }
   | { type: "agent:thinking"; payload: { agentId: string; agentName: string; content: string } }
-  | { type: "game:config"; payload: GameConfig }
   | { type: "eval:update"; payload: { score: number; mate: number | null } }
-  | { type: "series:state"; payload: SeriesState }
-  | { type: "notepad:updated"; payload: { agentName: string; team: Team; notepadType: "individual" | "team" } };
+  | { type: "arena:state"; payload: ArenaState }
+  | { type: "postgame:message"; payload: BoardMessage }
+  | { type: "agent:profile"; payload: AgentProfile };
 
 export type ClientEvent =
-  | { type: "game:create"; payload: { config: Omit<GameConfig, "id" | "createdAt"> } }
-  | { type: "game:start"; payload: { gameId: string } }
   | { type: "game:subscribe"; payload: { gameId: string } }
-  | { type: "series:subscribe"; payload: { seriesId: string } };
+  | { type: "arena:subscribe" }
+  | { type: "agent:get_profile"; payload: { agentName: string } };

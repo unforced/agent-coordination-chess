@@ -6,12 +6,14 @@ interface AgentStreamProps {
   agents: AgentConfig[];
   streams: Record<string, AgentThinking>;
   activeAgentId: string | null;
+  onAgentClick?: (agentName: string) => void;
 }
 
 export default function AgentStream({
   agents,
   streams,
   activeAgentId,
+  onAgentClick,
 }: AgentStreamProps) {
   const [selectedTab, setSelectedTab] = useState<string>(
     agents.length > 0 ? agents[0].id : ""
