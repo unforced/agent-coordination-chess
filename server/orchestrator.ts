@@ -347,6 +347,12 @@ export class GameOrchestrator {
       }
     }
 
+    // Log all message types for debugging
+    if (msg.type !== "system") {
+      console.log(`[${logPrefix}] ${agent.name} msg: type=${msg.type} subtype=${msg.subtype ?? "-"}`);
+    }
+
+    // Assistant messages — text and tool calls
     if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
         if (block.type === "tool_use") {
@@ -354,10 +360,19 @@ export class GameOrchestrator {
           console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${inputStr.slice(0, 200)})`);
           this.emitThinking(agent.id, agent.name, `\n── ${block.name} ──\n${inputStr}\n`);
         } else if (block.type === "text" && block.text) {
-          console.log(`[${logPrefix}] ${agent.name} → ${block.text.slice(0, 150)}`);
+          console.log(`[${logPrefix}] ${agent.name} → text(${block.text.length} chars): ${block.text.slice(0, 150)}`);
           this.emitThinking(agent.id, agent.name, block.text + "\n");
+        } else if (block.type === "thinking" && block.thinking) {
+          // Extended thinking blocks (if enabled)
+          console.log(`[${logPrefix}] ${agent.name} → thinking(${block.thinking.length} chars)`);
+          this.emitThinking(agent.id, agent.name, block.thinking + "\n");
         }
       }
+    }
+
+    // Result messages — log for diagnostics
+    if (msg.type === "result") {
+      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype} len=${msg.result?.length ?? 0}`);
     }
 
     if (msg.type === "user" && Array.isArray(msg.message?.content)) {
