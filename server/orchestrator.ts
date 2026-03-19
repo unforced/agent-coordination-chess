@@ -14,6 +14,7 @@ import {
   SELF_DEFINITION_LIMIT,
   STRATEGY_LIMIT,
   NOTEPAD_LIMIT,
+  AGENT_NOTE_LIMIT,
   MAX_NOTEPADS_VISIBLE,
 } from "../shared/types.js";
 import {
@@ -31,6 +32,8 @@ import {
   loadRecentNotepads,
   saveGameRecord,
   savePostgameMessage,
+  saveAgentNote,
+  loadAgentNotesForGame,
 } from "./persistence.js";
 import { getPersonality } from "./personalities.js";
 import { analyzeGame, formatAnalysisSummary, getSpectatorEval } from "./engine.js";
@@ -61,7 +64,8 @@ function buildAgentSystemPrompt(
   teamAgents: AgentConfig[],
   team: Team,
   profile: AgentProfile | null,
-  recentNotepads: string[]
+  recentNotepads: string[],
+  agentNotes: { subject: string; content: string }[]
 ): string {
   const teammates = teamAgents
     .filter((a) => a.id !== agent.id)
@@ -91,6 +95,14 @@ Your memory persists across the entire game. Between games you reflect and learn
     prompt += `\n\nYOUR RECENT GAME NOTES (newest first):`;
     for (let i = 0; i < recentNotepads.length; i++) {
       prompt += `\n[Game -${i + 1}]: ${recentNotepads[i]}`;
+    }
+  }
+
+  // Notes on other agents in this game
+  if (agentNotes.length > 0) {
+    prompt += `\n\nYOUR NOTES ON OTHER PLAYERS:`;
+    for (const note of agentNotes) {
+      prompt += `\n[${note.subject}]: ${note.content}`;
     }
   }
 
@@ -176,6 +188,8 @@ ${profile.strategy || "(empty)"}
 ${profile.selfDefinition || "(empty)"}
 
 4. **post_reflection** — Share a message with ALL players (both teams) on the post-game board. Offer feedback, observations, or compliments to teammates and opponents.
+
+5. **update_agent_note** — Update your private note on another player (max ${AGENT_NOTE_LIMIT} chars). Record what you've learned about their style, strengths, and tendencies.
 
 Reflect honestly. Write your game notepad and post at least one message to the group.`;
 }
@@ -541,10 +555,15 @@ export class GameOrchestrator {
     const profile = this.profiles.get(agent.name) ?? null;
     const recentNotepads = loadRecentNotepads(agent.name, MAX_NOTEPADS_VISIBLE).map((n) => n.content);
 
+    // Load notes on all other agents in this game
+    const allGameAgents = [...this.config.white.agents, ...this.config.black.agents];
+    const otherNames = allGameAgents.filter((a) => a.name !== agent.name).map((a) => a.name);
+    const agentNotes = loadAgentNotesForGame(agent.name, otherNames);
+
     const options = isFirstEver
       ? {
           model: resolveModel(agent.model),
-          systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team, profile, recentNotepads),
+          systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team, profile, recentNotepads, agentNotes),
           mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const,
         }
       : { resume: existingSessionId, mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const };
@@ -604,7 +623,7 @@ export class GameOrchestrator {
 
       const server = this.createReflectionServer(agent);
       const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 3,
-        allowedTools: ["mcp__chess__write_game_notepad", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__post_reflection"],
+        allowedTools: ["mcp__chess__write_game_notepad", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__post_reflection", "mcp__chess__update_agent_note"],
         permissionMode: "dontAsk" as const };
 
       try {
@@ -631,7 +650,7 @@ export class GameOrchestrator {
 
       const server = this.createReflectionServer(agent);
       const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 2,
-        allowedTools: ["mcp__chess__post_reflection", "mcp__chess__update_strategy", "mcp__chess__update_self_definition"],
+        allowedTools: ["mcp__chess__post_reflection", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__update_agent_note"],
         permissionMode: "dontAsk" as const };
 
       try {
@@ -705,9 +724,29 @@ export class GameOrchestrator {
       }
     );
 
+    const allGameAgents = [...orchestrator.config.white.agents, ...orchestrator.config.black.agents];
+    const otherNames = allGameAgents.filter((a) => a.name !== agent.name).map((a) => a.name);
+
+    const updateAgentNote = tool("update_agent_note",
+      `Update your private note on another player (max ${AGENT_NOTE_LIMIT} chars). Players: ${otherNames.join(", ")}`,
+      {
+        agentName: z.string().describe("Name of the player to write about"),
+        content: z.string().describe("Your observations about this player's style and tendencies"),
+      },
+      async (args: { agentName: string; content: string }) => {
+        if (!otherNames.includes(args.agentName)) {
+          return { content: [{ type: "text" as const, text: `Unknown player: ${args.agentName}. Choose from: ${otherNames.join(", ")}` }] };
+        }
+        const trimmed = args.content.slice(0, AGENT_NOTE_LIMIT);
+        saveAgentNote(agent.name, args.agentName, trimmed);
+        console.log(`[postgame] ${agent.name} noted on ${args.agentName}: ${trimmed.slice(0, 80)}`);
+        return { content: [{ type: "text" as const, text: `Note on ${args.agentName} saved.` }] };
+      }
+    );
+
     return createSdkMcpServer({
       name: `chess-reflect-${agent.name.toLowerCase()}`,
-      tools: [writeNotepad, updateStrategy, updateSelf, postReflection],
+      tools: [writeNotepad, updateStrategy, updateSelf, postReflection, updateAgentNote],
     });
   }
 }

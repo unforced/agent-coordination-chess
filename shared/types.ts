@@ -48,6 +48,7 @@ export interface GameNotepad {
 export const SELF_DEFINITION_LIMIT = 200;
 export const STRATEGY_LIMIT = 1000;
 export const NOTEPAD_LIMIT = 500;
+export const AGENT_NOTE_LIMIT = 200;
 export const MAX_NOTEPADS_VISIBLE = 10;
 
 // ── Game ─────────────────────────────────────────────────────────────

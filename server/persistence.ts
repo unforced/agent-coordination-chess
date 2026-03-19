@@ -66,6 +66,14 @@ db.exec(`
     timestamp INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS agent_notes (
+    author TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (author, subject)
+  );
+
   INSERT OR IGNORE INTO arena_state (id, total_games_played, current_game_number, status)
   VALUES (1, 0, 0, 'running');
 `);
@@ -128,6 +136,17 @@ const stmts = {
   getPostgameMsgs: db.prepare(`
     SELECT * FROM postgame_messages WHERE game_number = ? ORDER BY timestamp
   `),
+
+  // Agent notes (what one agent knows about another)
+  upsertAgentNote: db.prepare(`
+    INSERT INTO agent_notes (author, subject, content, updated_at)
+    VALUES (@author, @subject, @content, @updatedAt)
+    ON CONFLICT(author, subject) DO UPDATE SET
+      content = @content, updated_at = @updatedAt
+  `),
+  getAgentNote: db.prepare(`SELECT * FROM agent_notes WHERE author = ? AND subject = ?`),
+  getAgentNotes: db.prepare(`SELECT * FROM agent_notes WHERE author = ?`),
+  getNotesForSubjects: db.prepare(`SELECT * FROM agent_notes WHERE author = ? AND subject IN (SELECT value FROM json_each(?))`),
 };
 
 // ── Agent Profiles ───────────────────────────────────────────────────
@@ -248,4 +267,34 @@ export function savePostgameMessage(
 
 export function loadPostgameMessages(gameNumber: number) {
   return stmts.getPostgameMsgs.all(gameNumber) as any[];
+}
+
+// ── Agent Notes ──────────────────────────────────────────────────────
+
+export interface AgentNote {
+  author: string;
+  subject: string;
+  content: string;
+  updatedAt: string;
+}
+
+export function saveAgentNote(author: string, subject: string, content: string): void {
+  stmts.upsertAgentNote.run({
+    author, subject, content, updatedAt: new Date().toISOString(),
+  });
+}
+
+export function loadAgentNotesForGame(authorName: string, otherAgentNames: string[]): AgentNote[] {
+  if (otherAgentNames.length === 0) return [];
+  const rows = stmts.getNotesForSubjects.all(authorName, JSON.stringify(otherAgentNames)) as any[];
+  return rows.map((r) => ({
+    author: r.author, subject: r.subject, content: r.content, updatedAt: r.updated_at,
+  }));
+}
+
+export function loadAllAgentNotes(authorName: string): AgentNote[] {
+  const rows = stmts.getAgentNotes.all(authorName) as any[];
+  return rows.map((r) => ({
+    author: r.author, subject: r.subject, content: r.content, updatedAt: r.updated_at,
+  }));
 }

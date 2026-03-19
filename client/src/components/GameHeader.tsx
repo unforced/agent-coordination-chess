@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from "react";
 import type { GameState, ArenaState } from "../../../shared/types";
 
 interface GameHeaderProps {
@@ -26,8 +27,41 @@ function getStatusLabel(gameState: GameState, activeAgentName: string | null): s
   return "DELIBERATING";
 }
 
+// Client-side clock interpolation — counts down smoothly between server ticks
+function useInterpolatedClock(serverMs: number, isActive: boolean): number {
+  const [displayMs, setDisplayMs] = useState(serverMs);
+  const lastServerMs = useRef(serverMs);
+  const lastSyncTime = useRef(Date.now());
+
+  // Sync when server sends a new value
+  useEffect(() => {
+    lastServerMs.current = serverMs;
+    lastSyncTime.current = Date.now();
+    setDisplayMs(serverMs);
+  }, [serverMs]);
+
+  // Client-side countdown at 100ms intervals when active
+  useEffect(() => {
+    if (!isActive) return;
+
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - lastSyncTime.current;
+      setDisplayMs(Math.max(0, lastServerMs.current - elapsed));
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [isActive]);
+
+  return displayMs;
+}
+
 export default function GameHeader({ gameState, connected, activeAgentName, arenaState }: GameHeaderProps) {
   const isLowTime = (ms: number) => ms < 60_000;
+  const isWhiteTurn = gameState?.currentTurn === "white" && gameState?.phase === "deliberation";
+  const isBlackTurn = gameState?.currentTurn === "black" && gameState?.phase === "deliberation";
+
+  const whiteMs = useInterpolatedClock(gameState?.clockWhite ?? 0, isWhiteTurn);
+  const blackMs = useInterpolatedClock(gameState?.clockBlack ?? 0, isBlackTurn);
 
   return (
     <header className="game-header">
@@ -44,11 +78,11 @@ export default function GameHeader({ gameState, connected, activeAgentName, aren
       {gameState && (
         <div className="game-header__center">
           <div
-            className={`game-header__clock ${gameState.currentTurn === "white" ? "game-header__clock--active" : ""} ${isLowTime(gameState.clockWhite) ? "game-header__clock--low" : ""}`}
-            style={{ borderColor: gameState.currentTurn === "white" ? "var(--white-team)" : "transparent", color: gameState.currentTurn === "white" ? "var(--white-team)" : "var(--text-muted)" }}
+            className={`game-header__clock ${isWhiteTurn ? "game-header__clock--active" : ""} ${isLowTime(whiteMs) ? "game-header__clock--low" : ""}`}
+            style={{ borderColor: isWhiteTurn ? "var(--white-team)" : "transparent", color: isWhiteTurn ? "var(--white-team)" : "var(--text-muted)" }}
           >
             <span className="game-header__clock-label">W</span>
-            {formatClock(gameState.clockWhite)}
+            {formatClock(whiteMs)}
           </div>
 
           <div className="game-header__turn-info">
@@ -60,11 +94,11 @@ export default function GameHeader({ gameState, connected, activeAgentName, aren
           </div>
 
           <div
-            className={`game-header__clock ${gameState.currentTurn === "black" ? "game-header__clock--active" : ""} ${isLowTime(gameState.clockBlack) ? "game-header__clock--low" : ""}`}
-            style={{ borderColor: gameState.currentTurn === "black" ? "var(--black-team)" : "transparent", color: gameState.currentTurn === "black" ? "var(--black-team)" : "var(--text-muted)" }}
+            className={`game-header__clock ${isBlackTurn ? "game-header__clock--active" : ""} ${isLowTime(blackMs) ? "game-header__clock--low" : ""}`}
+            style={{ borderColor: isBlackTurn ? "var(--black-team)" : "transparent", color: isBlackTurn ? "var(--black-team)" : "var(--text-muted)" }}
           >
             <span className="game-header__clock-label">B</span>
-            {formatClock(gameState.clockBlack)}
+            {formatClock(blackMs)}
           </div>
         </div>
       )}
