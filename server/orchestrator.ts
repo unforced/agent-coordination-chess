@@ -363,9 +363,8 @@ export class GameOrchestrator {
           console.log(`[${logPrefix}] ${agent.name} → text(${block.text.length} chars): ${block.text.slice(0, 150)}`);
           this.emitThinking(agent.id, agent.name, block.text + "\n");
         } else if (block.type === "thinking" && block.thinking) {
-          // Extended thinking blocks (if enabled)
           console.log(`[${logPrefix}] ${agent.name} → thinking(${block.thinking.length} chars)`);
-          this.emitThinking(agent.id, agent.name, block.thinking + "\n");
+          this.emitThinking(agent.id, agent.name, `\n💭 ${block.thinking}\n`);
         }
       }
     }
@@ -576,13 +575,18 @@ export class GameOrchestrator {
     const otherNames = allGameAgents.filter((a) => a.name !== agent.name).map((a) => a.name);
     const agentNotes = loadAgentNotesForGame(agent.name, otherNames);
 
+    const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
+
     const options = isFirstEver
       ? {
           model: resolveModel(agent.model),
           systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team, profile, recentNotepads, agentNotes),
           mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const,
+          thinking: thinkingConfig,
         }
-      : { resume: existingSessionId, mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const };
+      : { resume: existingSessionId, mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const,
+          thinking: thinkingConfig,
+        };
 
     const agentDeadline = Date.now() + this.config.agentTurnTimeSec * 1000;
 
@@ -640,7 +644,8 @@ export class GameOrchestrator {
       const server = this.createReflectionServer(agent);
       const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 3,
         allowedTools: ["mcp__chess__write_game_notepad", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__post_reflection", "mcp__chess__update_agent_note"],
-        permissionMode: "dontAsk" as const };
+        permissionMode: "dontAsk" as const,
+        thinking: { type: "enabled" as const, budgetTokens: 5000 } };
 
       try {
         for await (const message of query({ prompt, options })) {
@@ -667,7 +672,8 @@ export class GameOrchestrator {
       const server = this.createReflectionServer(agent);
       const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 2,
         allowedTools: ["mcp__chess__post_reflection", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__update_agent_note"],
-        permissionMode: "dontAsk" as const };
+        permissionMode: "dontAsk" as const,
+        thinking: { type: "enabled" as const, budgetTokens: 3000 } };
 
       try {
         for await (const message of query({ prompt: discussionPrompt, options })) {
