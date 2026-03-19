@@ -29,7 +29,8 @@ import {
   loadAgentProfile,
   saveGameNotepad,
   loadRecentNotepads,
-  saveGameMoves,
+  saveGameRecord,
+  savePostgameMessage,
 } from "./persistence.js";
 import { getPersonality } from "./personalities.js";
 import { analyzeGame, formatAnalysisSummary, getSpectatorEval } from "./engine.js";
@@ -393,7 +394,17 @@ export class GameOrchestrator {
       await this.runTurn();
     }
 
-    saveGameMoves(this.config.gameNumber, this.getLog());
+    // Save game to database
+    const whiteNames = this.config.white.agents.map((a) => a.name);
+    const blackNames = this.config.black.agents.map((a) => a.name);
+    saveGameRecord(
+      this.config.gameNumber, this.config.id,
+      whiteNames, blackNames,
+      this.state.winner, this.state.moveHistory.length,
+      Date.now() - (this.state.moveHistory[0]?.timestamp ?? Date.now()),
+      this.getLog(), this.config.createdAt
+    );
+
     await this.runPostGame();
     this.resolveCompletion?.();
   }
@@ -688,6 +699,7 @@ export class GameOrchestrator {
         };
         orchestrator.postGameMessages.push(msg);
         orchestrator.emit({ type: "postgame:message", payload: msg });
+        savePostgameMessage(msg.id, orchestrator.config.gameNumber, agent.name, args.message, msg.timestamp);
         console.log(`[postgame] ${agent.name} posted: ${args.message.slice(0, 100)}`);
         return { content: [{ type: "text" as const, text: "Posted to post-game board." }] };
       }

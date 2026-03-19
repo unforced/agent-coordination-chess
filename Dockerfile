@@ -1,7 +1,7 @@
 FROM node:20-slim
 
-# Install stockfish
-RUN apt-get update && apt-get install -y stockfish && rm -rf /var/lib/apt/lists/*
+# Install stockfish + build tools for better-sqlite3
+RUN apt-get update && apt-get install -y stockfish python3 make g++ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

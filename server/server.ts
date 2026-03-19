@@ -5,7 +5,7 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ServerEvent, ClientEvent } from "../shared/types.js";
 import { startArena, getCurrentOrchestrator, getArenaState, onArenaStateChange } from "./arena.js";
-import { loadAgentProfile } from "./persistence.js";
+import { loadAgentProfile, loadAllAgentProfiles, loadRecentGames } from "./persistence.js";
 
 // ── WebSocket subscribers ────────────────────────────────────────────
 
@@ -51,9 +51,12 @@ app.get("/api/agents/:name", (req, res) => {
 
 // API: all agent profiles
 app.get("/api/agents", (_req, res) => {
-  const names = ["Fischer", "Petrosian", "Tal", "Capablanca", "Kasparov", "Morphy", "Rookie", "Patzer"];
-  const profiles = names.map((n) => loadAgentProfile(n)).filter(Boolean);
-  res.json(profiles);
+  res.json(loadAllAgentProfiles());
+});
+
+// API: recent games
+app.get("/api/games/recent", (_req, res) => {
+  res.json(loadRecentGames(20));
 });
 
 // SPA fallback

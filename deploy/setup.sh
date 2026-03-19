@@ -6,7 +6,7 @@ set -euo pipefail
 
 echo "=== Installing dependencies ==="
 apt-get update
-apt-get install -y curl git stockfish nginx certbot python3-certbot-nginx
+apt-get install -y curl git stockfish nginx certbot python3-certbot-nginx python3 make g++
 
 # Node.js 20
 if ! command -v node &>/dev/null; then
