@@ -34,6 +34,7 @@ import {
   savePostgameMessage,
   saveAgentNote,
   loadAgentNotesForGame,
+  snapshotAgentProfile,
 } from "./persistence.js";
 import { getPersonality } from "./personalities.js";
 import { analyzeGame, formatAnalysisSummary, getSpectatorEval } from "./engine.js";
@@ -658,6 +659,12 @@ export class GameOrchestrator {
           this.streamSdkMessage(message, agent, "discussion");
         }
       } catch (err: any) { console.error(`[discussion] ${agent.name} error:`, err?.message ?? err); }
+    }
+
+    // Snapshot all agent profiles for evolution tracking
+    const allAgentsForSnapshot = [...this.config.white.agents, ...this.config.black.agents];
+    for (const agent of allAgentsForSnapshot) {
+      snapshotAgentProfile(agent.name, this.config.gameNumber);
     }
 
     console.log("[postgame] Post-game complete.");

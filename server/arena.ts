@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import type { GameConfig, AgentConfig, ArenaState, Team } from "../shared/types.js";
 import { GameOrchestrator, type EventCallback } from "./orchestrator.js";
 import { getPersonality } from "./personalities.js";
-import { saveArenaState, loadArenaState, loadAgentProfile, saveAgentProfile } from "./persistence.js";
+import { saveArenaState, loadArenaState, loadAgentProfile, saveAgentProfile, resetDatabase } from "./persistence.js";
 
 // ── Team compositions to rotate through ──────────────────────────────
 
@@ -79,6 +79,13 @@ export async function startArena(
   gameEventCallback: EventCallback
 ): Promise<void> {
   onGameEvent = gameEventCallback;
+
+  // Reset database if requested (start fresh)
+  if (process.env.RESET_DB === "1") {
+    console.log("[arena] RESET_DB=1 — wiping database and starting fresh");
+    resetDatabase();
+  }
+
   ensureProfiles();
 
   // Resume from saved state or start fresh

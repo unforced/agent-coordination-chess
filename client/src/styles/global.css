@@ -778,6 +778,419 @@ body {
   justify-content: center;
 }
 
+/* ── Tab Navigation ──────────────────────────────────────────────── */
+.tab-nav {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+  padding: 0 24px;
+}
+
+.tab-nav__tab {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-nav__tab:hover {
+  color: var(--text-secondary);
+}
+
+.tab-nav__tab--active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-gold);
+}
+
+.tab-nav__live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-danger);
+  animation: pulse-urgent 1.5s infinite;
+}
+
+.tab-nav__count {
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-primary);
+}
+
+/* ── Game History ────────────────────────────────────────────────── */
+.game-history {
+  padding: 16px 24px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.game-history__loading,
+.game-history__empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 40px;
+}
+
+.game-history__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.game-history__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.game-history__item:hover {
+  border-color: var(--border-medium);
+  background: var(--bg-tertiary);
+}
+
+.game-history__item-num {
+  color: var(--text-muted);
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.game-history__item-teams {
+  flex: 1;
+  font-size: 11px;
+}
+
+.game-history__item-result {
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.game-history__item-moves {
+  color: var(--text-muted);
+  font-size: 10px;
+  width: 60px;
+  text-align: right;
+}
+
+.game-history__result--white { color: var(--white-team); }
+.game-history__result--black { color: var(--black-team); }
+.game-history__result--draw { color: var(--text-muted); }
+
+.game-history__back {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 0;
+  margin-bottom: 12px;
+}
+
+.game-history__back:hover { color: var(--text-primary); }
+
+.game-history__detail-header {
+  margin-bottom: 16px;
+}
+
+.game-history__detail-title {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.game-history__detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.game-history__teams {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.game-history__team {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.game-history__team-label {
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.game-history__agent-tag {
+  background: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.game-history__info {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.game-history__section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+
+.game-history__section-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.game-history__moves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.game-history__move {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.game-history__move--white { background: var(--white-team-dim); color: var(--white-team); }
+.game-history__move--black { background: var(--black-team-dim); color: var(--black-team); }
+.game-history__move-num { color: var(--text-muted); margin-right: 2px; font-weight: 400; }
+
+.game-history__postgame-msg {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.game-history__postgame-msg:last-child { border-bottom: none; }
+
+.game-history__msg-author {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 4px;
+}
+
+/* ── Players View ────────────────────────────────────────────────── */
+.players-view {
+  padding: 16px 24px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.players-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.player-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.player-card:hover {
+  border-color: var(--border-medium);
+  background: var(--bg-tertiary);
+}
+
+.player-card__name {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.player-card__identity {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.player-card__stats {
+  display: flex;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.player-detail {
+  margin-top: 12px;
+}
+
+.player-detail__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.player-detail__name {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.player-detail__stats {
+  display: flex;
+  gap: 8px;
+}
+
+.player-detail__stat {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.player-detail__stat--wins { color: var(--accent-success); }
+.player-detail__stat--losses { color: var(--accent-danger); }
+.player-detail__stat--draws { color: var(--text-muted); }
+
+.player-detail__section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.player-detail__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.player-detail__content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+.player-detail__note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.player-detail__note:last-child { border-bottom: none; }
+
+.player-detail__note-subject {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.player-detail__notepad {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.player-detail__notepad:last-child { border-bottom: none; }
+
+.player-detail__notepad-game {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.player-detail__history {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.player-detail__history:last-child { border-bottom: none; }
+
+.player-detail__history-game {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.player-detail__history-change {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
 /* ── Agent Profile Panel ──────────────────────────────────────────── */
 .agent-profile {
   display: flex;

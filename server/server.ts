@@ -5,7 +5,11 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ServerEvent, ClientEvent } from "../shared/types.js";
 import { startArena, getCurrentOrchestrator, getArenaState, onArenaStateChange } from "./arena.js";
-import { loadAgentProfile, loadAllAgentProfiles, loadRecentGames } from "./persistence.js";
+import {
+  loadAgentProfile, loadAllAgentProfiles, loadRecentGames,
+  loadGameByNumber, loadAgentStats, loadRecentNotepads,
+  loadPostgameMessages, loadAllAgentNotes, loadProfileHistory,
+} from "./persistence.js";
 
 // ── WebSocket subscribers ────────────────────────────────────────────
 
@@ -24,11 +28,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve built client
 const clientDist = path.join(process.cwd(), "client", "dist");
 app.use(express.static(clientDist));
 
-// API: current state
+// ── API Routes ───────────────────────────────────────────────────────
+
+// Current live state
 app.get("/api/state", (_req, res) => {
   const orchestrator = getCurrentOrchestrator();
   const arena = getArenaState();
@@ -39,27 +44,52 @@ app.get("/api/state", (_req, res) => {
   });
 });
 
-// API: agent profile
+// Agent profiles
+app.get("/api/agents", (_req, res) => {
+  const profiles = loadAllAgentProfiles();
+  const enriched = profiles.map((p) => ({
+    ...p,
+    stats: loadAgentStats(p.name),
+    recentNotepads: loadRecentNotepads(p.name, 5).map((n) => ({
+      gameNumber: n.gameNumber,
+      content: n.content,
+    })),
+    notes: loadAllAgentNotes(p.name),
+  }));
+  res.json(enriched);
+});
+
 app.get("/api/agents/:name", (req, res) => {
   const profile = loadAgentProfile(req.params.name);
-  if (!profile) {
-    res.status(404).json({ error: "Agent not found" });
-    return;
-  }
-  res.json(profile);
+  if (!profile) { res.status(404).json({ error: "Agent not found" }); return; }
+
+  const stats = loadAgentStats(req.params.name);
+  const notepads = loadRecentNotepads(req.params.name, 10);
+  const notes = loadAllAgentNotes(req.params.name);
+
+  const history = loadProfileHistory(req.params.name);
+  res.json({ ...profile, stats, notepads, notes, history });
 });
 
-// API: all agent profiles
-app.get("/api/agents", (_req, res) => {
-  res.json(loadAllAgentProfiles());
+// Game history
+app.get("/api/games", (req, res) => {
+  const limit = parseInt(req.query?.limit as string) || 50;
+  res.json(loadRecentGames(limit));
 });
 
-// API: recent games
-app.get("/api/games/recent", (_req, res) => {
-  res.json(loadRecentGames(20));
+app.get("/api/games/:number", (req, res) => {
+  const gameNumber = parseInt(req.params.number);
+  if (isNaN(gameNumber)) { res.status(400).json({ error: "Invalid game number" }); return; }
+
+  const game = loadGameByNumber(gameNumber);
+  if (!game) { res.status(404).json({ error: "Game not found" }); return; }
+
+  const postgameMessages = loadPostgameMessages(gameNumber);
+
+  res.json({ ...game, postgameMessages });
 });
 
-// SPA fallback
+// SPA fallback (must be last)
 app.get("*", (_req, res) => {
   res.sendFile(path.join(clientDist, "index.html"));
 });
@@ -73,7 +103,6 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
   subscribers.add(ws);
 
-  // Send current state immediately
   const orchestrator = getCurrentOrchestrator();
   const arena = getArenaState();
 
@@ -102,18 +131,12 @@ wss.on("connection", (ws) => {
   ws.on("close", () => subscribers.delete(ws));
 });
 
-// ── Arena state changes broadcast ────────────────────────────────────
-
 onArenaStateChange((state) => {
   broadcast({ type: "arena:state", payload: state });
 });
 
-// ── Start ────────────────────────────────────────────────────────────
-
 server.listen(PORT, () => {
   console.log(`Chess Arena running on http://localhost:${PORT}`);
-
-  // Start the continuous arena
   startArena((event) => broadcast(event)).catch((err) => {
     console.error("Arena error:", err);
   });

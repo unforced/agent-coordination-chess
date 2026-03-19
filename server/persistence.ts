@@ -66,6 +66,15 @@ db.exec(`
     timestamp INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS agent_profile_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    game_number INTEGER NOT NULL,
+    self_definition TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS agent_notes (
     author TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -135,6 +144,15 @@ const stmts = {
   `),
   getPostgameMsgs: db.prepare(`
     SELECT * FROM postgame_messages WHERE game_number = ? ORDER BY timestamp
+  `),
+
+  // Agent profile history (snapshots for evolution tracking)
+  insertProfileSnapshot: db.prepare(`
+    INSERT INTO agent_profile_history (agent_name, game_number, self_definition, strategy, snapshot_at)
+    VALUES (@agentName, @gameNumber, @selfDefinition, @strategy, @snapshotAt)
+  `),
+  getProfileHistory: db.prepare(`
+    SELECT * FROM agent_profile_history WHERE agent_name = ? ORDER BY game_number ASC
   `),
 
   // Agent notes (what one agent knows about another)
@@ -231,8 +249,61 @@ export function saveGameRecord(
   });
 }
 
-export function loadRecentGames(limit = 20) {
-  return stmts.getRecentGames.all(limit) as any[];
+export interface GameRecord {
+  gameNumber: number;
+  gameId: string;
+  whiteAgents: string[];
+  blackAgents: string[];
+  winner: string | null;
+  totalMoves: number;
+  durationMs: number;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export function loadRecentGames(limit = 20): GameRecord[] {
+  const rows = stmts.getRecentGames.all(limit) as any[];
+  return rows.map(parseGameRow);
+}
+
+export function loadGameByNumber(gameNumber: number): (GameRecord & { moves: MoveRecord[] }) | null {
+  const row = stmts.getGame.get(gameNumber) as any;
+  if (!row) return null;
+  return {
+    ...parseGameRow(row),
+    moves: row.moves_json ? JSON.parse(row.moves_json) : [],
+  };
+}
+
+function parseGameRow(row: any): GameRecord {
+  return {
+    gameNumber: row.game_number,
+    gameId: row.game_id,
+    whiteAgents: JSON.parse(row.white_agents),
+    blackAgents: JSON.parse(row.black_agents),
+    winner: row.winner,
+    totalMoves: row.total_moves,
+    durationMs: row.duration_ms,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+  };
+}
+
+export function loadAgentStats(agentName: string) {
+  const rows = stmts.getAgentGames.all(`%${agentName}%`, `%${agentName}%`, 100) as any[];
+  let wins = 0, losses = 0, draws = 0;
+  for (const row of rows) {
+    const whiteAgents: string[] = JSON.parse(row.white_agents);
+    const blackAgents: string[] = JSON.parse(row.black_agents);
+    const isWhite = whiteAgents.includes(agentName);
+    const isBlack = blackAgents.includes(agentName);
+    if (!isWhite && !isBlack) continue;
+
+    if (row.winner === "draw") draws++;
+    else if ((row.winner === "white" && isWhite) || (row.winner === "black" && isBlack)) wins++;
+    else losses++;
+  }
+  return { wins, losses, draws, totalGames: wins + losses + draws };
 }
 
 // ── Arena State ──────────────────────────────────────────────────────
@@ -244,6 +315,19 @@ export function saveArenaState(state: ArenaState): void {
     currentGameId: state.currentGameId,
     status: state.status,
   });
+}
+
+export function resetDatabase(): void {
+  db.exec(`
+    DELETE FROM agent_profiles;
+    DELETE FROM game_notepads;
+    DELETE FROM games;
+    DELETE FROM postgame_messages;
+    DELETE FROM agent_notes;
+    DELETE FROM agent_profile_history;
+    UPDATE arena_state SET total_games_played = 0, current_game_number = 0, current_game_id = NULL, status = 'running' WHERE id = 1;
+  `);
+  console.log("[db] Database reset to clean state.");
 }
 
 export function loadArenaState(): ArenaState | null {
@@ -289,6 +373,39 @@ export function loadAgentNotesForGame(authorName: string, otherAgentNames: strin
   const rows = stmts.getNotesForSubjects.all(authorName, JSON.stringify(otherAgentNames)) as any[];
   return rows.map((r) => ({
     author: r.author, subject: r.subject, content: r.content, updatedAt: r.updated_at,
+  }));
+}
+
+// ── Agent Profile History ─────────────────────────────────────────────
+
+export interface ProfileSnapshot {
+  agentName: string;
+  gameNumber: number;
+  selfDefinition: string;
+  strategy: string;
+  snapshotAt: string;
+}
+
+export function snapshotAgentProfile(agentName: string, gameNumber: number): void {
+  const profile = loadAgentProfile(agentName);
+  if (!profile) return;
+  stmts.insertProfileSnapshot.run({
+    agentName,
+    gameNumber,
+    selfDefinition: profile.selfDefinition,
+    strategy: profile.strategy,
+    snapshotAt: new Date().toISOString(),
+  });
+}
+
+export function loadProfileHistory(agentName: string): ProfileSnapshot[] {
+  const rows = stmts.getProfileHistory.all(agentName) as any[];
+  return rows.map((r) => ({
+    agentName: r.agent_name,
+    gameNumber: r.game_number,
+    selfDefinition: r.self_definition,
+    strategy: r.strategy,
+    snapshotAt: r.snapshot_at,
   }));
 }
 
