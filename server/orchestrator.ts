@@ -4,13 +4,14 @@ import { v4 as uuidv4 } from "uuid";
 import {
   GameConfig,
   GameState,
-  GamePhase,
   Team,
   AgentConfig,
   BoardMessage,
   MoveRecord,
   DeliberationState,
   ServerEvent,
+  INDIVIDUAL_NOTEPAD_LIMIT,
+  TEAM_NOTEPAD_LIMIT,
 } from "../shared/types.js";
 import {
   createGame,
@@ -20,6 +21,15 @@ import {
   getLegalMoves,
   boardToAscii,
 } from "./game.js";
+import {
+  saveIndividualNotepad,
+  saveTeamNotepad,
+  loadIndividualNotepad,
+  loadTeamNotepad,
+  saveGameMoves,
+} from "./persistence.js";
+import { getPersonality } from "./personalities.js";
+import { analyzeGame, formatAnalysisSummary, getSpectatorEval, type MoveAnalysis } from "./engine.js";
 
 // ── Model mapping ────────────────────────────────────────────────────
 
@@ -33,71 +43,100 @@ function resolveModel(model: string): string {
   return MODEL_MAP[model] ?? model;
 }
 
+function formatClock(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 // ── Prompts ──────────────────────────────────────────────────────────
 
 function buildAgentSystemPrompt(
   agent: AgentConfig,
   teamAgents: AgentConfig[],
-  team: Team
+  team: Team,
+  personalityFragment?: string,
+  individualNotepad?: string,
+  teamNotepad?: string
 ): string {
   const teammates = teamAgents
     .filter((a) => a.id !== agent.id)
     .map((a) => a.name)
     .join(", ");
 
-  return `You are ${agent.name}, one of four agents on the ${team} team in a collaborative chess game.
+  const isSolo = teamAgents.length === 1;
 
-YOUR TEAM: ${teamAgents.map((a) => a.name).join(", ")}
-YOUR TEAMMATES: ${teammates}
-YOU PLAY AS: ${team.toUpperCase()}
+  let prompt = `You are ${agent.name}, on the ${team} team in a collaborative chess game.
 
-This is a long-running game. You will be called upon each turn to deliberate with your team. Your memory persists across turns — you can reference prior discussions, remember what strategies worked, and build relationships with your teammates.
+TEAM: ${teamAgents.map((a) => a.name).join(", ")}${teammates ? ` | TEAMMATES: ${teammates}` : ""} | YOU PLAY: ${team.toUpperCase()}
 
-HOW TO INTERACT:
-- Use the read_messages tool to see what your teammates have said on the shared message board for THIS turn.
-- Use the post_message tool to share your analysis, candidate moves, and strategic ideas.
-- Read messages first, then contribute, then check for responses. Try 2-3 rounds of discussion per turn.
-- When you are selected to submit a move, use the submit_move tool.
+Your memory persists across the entire game.`;
 
-RULES:
-- After each deliberation period, one agent is RANDOMLY selected to submit the final move.
-- You do not know who will be selected, so always participate fully.
-- The message board resets each turn, but YOUR memory of the game persists.
+  if (personalityFragment) {
+    prompt += `\n\n${personalityFragment}`;
+  }
 
-CHESS GUIDELINES:
-- Reason from first principles. Evaluate material, position, king safety, pawn structure, piece activity, and tactics.
-- Share concrete analysis — specific moves, variations, and threats.
-- Build on teammates' ideas. Respectfully disagree when you see something different.
-- Do NOT access external tools, chess engines, or databases.
-- You don't know what model your teammates run — treat everyone as a fellow thinker.`;
+  if (isSolo) {
+    prompt += `\n\nYou are playing solo. Each turn you see the board and submit a move directly with submit_move.`;
+  } else {
+    prompt += `\n\nHOW IT WORKS:
+- Each turn, agents on your team take turns speaking one at a time (randomly ordered).
+- You see the board, legal moves, clock, and all teammate messages in your prompt.
+- You have two tools:
+  - post_message: share your analysis or move suggestion with the team
+  - submit_move: submit the team's move (ends the turn immediately)
+- You can post a message AND submit a move, or just post and let the next teammate decide.
+- A game clock counts down for your team — manage time wisely.`;
+  }
+
+  prompt += `\n\nMESSAGES:
+- Keep your posted messages SHORT — 1-3 sentences max. State your recommended move and a one-line reason.
+- If teammates have already converged on a move and you agree, just submit it.
+- If time is low, submit a move rather than deliberating further.`;
+
+  if (individualNotepad) {
+    prompt += `\n\nYOUR PERSONAL NOTES (from previous games):\n${individualNotepad}`;
+  }
+  if (teamNotepad) {
+    prompt += `\n\nTEAM NOTES (shared with teammates, from previous games):\n${teamNotepad}`;
+  }
+
+  return prompt;
 }
 
-function buildFirstTurnPrompt(fen: string, legalMoves: string[]): string {
-  const ascii = boardToAscii(fen);
-  return `The game begins! Here is the starting position:
-
-BOARD:
-\`\`\`
-${ascii}
-\`\`\`
-FEN: ${fen}
-LEGAL MOVES: ${legalMoves.join(", ")}
-
-This is your first turn. Use read_messages to see if any teammates have posted, then share your opening analysis with post_message. What opening ideas do you like? What should the team's strategy be?`;
-}
-
-function buildTurnPrompt(
+function buildAgentTurnPrompt(
   fen: string,
   legalMoves: string[],
   turnNumber: number,
-  lastMove: MoveRecord | null
+  lastOpponentMove: MoveRecord | null,
+  messages: BoardMessage[],
+  clockRemaining: number,
+  isFirstEver: boolean,
+  isSolo: boolean
 ): string {
   const ascii = boardToAscii(fen);
-  const lastMoveInfo = lastMove
-    ? `\nLast move: ${lastMove.selectedAgentName} (opponent) played ${lastMove.move}.`
+  const clock = formatClock(clockRemaining);
+
+  const lastMoveInfo = lastOpponentMove
+    ? `\nOpponent's last move: ${lastOpponentMove.selectedAgentName} played ${lastOpponentMove.move}.`
     : "";
 
-  return `Turn ${turnNumber}. It's your team's move.${lastMoveInfo}
+  const messageSection = !isSolo && messages.length > 0
+    ? `\nTEAM CHAT THIS TURN:\n${messages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}`
+    : isSolo
+      ? ""
+      : "\n(No messages yet this turn — you're first to speak.)";
+
+  const opening = isFirstEver
+    ? "The game begins! "
+    : `Turn ${turnNumber}. `;
+
+  const action = isSolo
+    ? "Submit your move."
+    : "Post your suggestion or submit a move (or both). Be brief.";
+
+  return `${opening}It's your team's move.${lastMoveInfo}
 
 BOARD:
 \`\`\`
@@ -105,33 +144,54 @@ ${ascii}
 \`\`\`
 FEN: ${fen}
 LEGAL MOVES: ${legalMoves.join(", ")}
+TEAM CLOCK: ${clock} remaining
+${messageSection}
 
-Use read_messages to see your teammates' analysis, then contribute with post_message. What's the best response here?`;
+${action}`;
 }
 
-function buildMoveSelectionPrompt(
-  fen: string,
-  legalMoves: string[],
-  messages: BoardMessage[]
+function buildPostGamePrompt(
+  winner: Team | "draw" | null,
+  team: Team,
+  individualNotepad: string,
+  teamNotepad: string,
+  engineAnalysis?: string
 ): string {
-  const ascii = boardToAscii(fen);
-  const messageHistory = messages.length > 0
-    ? messages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")
-    : "(No discussion happened this turn)";
+  const outcome = winner === "draw"
+    ? "The game ended in a draw."
+    : winner === team
+      ? "Your team WON!"
+      : "Your team LOST.";
 
-  return `YOU HAVE BEEN RANDOMLY SELECTED to submit the move for your team this turn.
+  let prompt = `GAME OVER. ${outcome}
 
-CURRENT POSITION:
-\`\`\`
-${ascii}
-\`\`\`
-FEN: ${fen}
-LEGAL MOVES: ${legalMoves.join(", ")}
+Reflect on this game. What worked? What didn't? What should you remember for next time?`;
 
-TEAM DISCUSSION THIS TURN:
-${messageHistory}
+  if (engineAnalysis) {
+    prompt += `\n\n${engineAnalysis}`;
+  }
 
-Based on the team's discussion and your own analysis, use the submit_move tool to submit a legal move.`;
+  prompt += `\n\nYOUR PERSONAL NOTEPAD (max ${INDIVIDUAL_NOTEPAD_LIMIT} chars, only you see this):
+${individualNotepad || "(empty)"}
+
+TEAM NOTEPAD (max ${TEAM_NOTEPAD_LIMIT} chars, shared with teammates):
+${teamNotepad || "(empty)"}
+
+Use update_individual_notepad and/or update_team_notepad to save observations for future games. Be concise — character limits are strict. You can update both, one, or neither.`;
+
+  return prompt;
+}
+
+// ── Series context ───────────────────────────────────────────────────
+
+export interface SeriesContext {
+  seriesId: string;
+  gameIndex: number;
+}
+
+export interface NotepadState {
+  individual: Map<string, string>; // agentName → content
+  team: Map<Team, string>; // team → content
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
@@ -142,16 +202,30 @@ export class GameOrchestrator {
   private config: GameConfig;
   private state: GameState;
   private listeners: Set<EventCallback> = new Set();
-  private abortController: AbortController | null = null;
   private tickInterval: ReturnType<typeof setInterval> | null = null;
+  private seriesContext: SeriesContext | null;
+  private notepads: NotepadState;
 
-  // Persistent agent sessions — each agent keeps context across the whole game
-  private agentSessions: Map<string, string> = new Map(); // agentId → sessionId
+  // Persistent agent sessions
+  private agentSessions: Map<string, string> = new Map();
 
-  constructor(config: GameConfig) {
+  // Track last agent who spoke to avoid repeats
+  private lastAgentId: Map<Team, string> = new Map();
+
+  // Completion promise
+  private resolveCompletion: (() => void) | null = null;
+
+  constructor(
+    config: GameConfig,
+    seriesContext?: SeriesContext,
+    notepads?: NotepadState
+  ) {
     this.config = config;
+    this.seriesContext = seriesContext ?? null;
+    this.notepads = notepads ?? { individual: new Map(), team: new Map() };
 
     const fen = createGame();
+    const clockMs = config.gameTimeSec * 1000;
     this.state = {
       gameId: config.id,
       fen,
@@ -161,6 +235,8 @@ export class GameOrchestrator {
       turnNumber: 1,
       winner: null,
       deliberation: null,
+      clockWhite: clockMs,
+      clockBlack: clockMs,
     };
   }
 
@@ -187,8 +263,19 @@ export class GameOrchestrator {
     return { ...this.state };
   }
 
+  getConfig(): GameConfig {
+    return this.config;
+  }
+
   getLog(): MoveRecord[] {
     return [...this.state.moveHistory];
+  }
+
+  getResult() {
+    return {
+      winner: this.state.winner,
+      totalMoves: this.state.moveHistory.length,
+    };
   }
 
   async start(): Promise<void> {
@@ -200,12 +287,67 @@ export class GameOrchestrator {
     });
   }
 
+  /** Runs the full game + post-game deliberation. Resolves when everything is done. */
+  async runToCompletion(): Promise<void> {
+    if (this.state.phase !== "waiting") {
+      throw new Error("Game already started");
+    }
+    return new Promise<void>((resolve) => {
+      this.resolveCompletion = resolve;
+      this.runGameLoop().catch((err) => {
+        console.error("Game loop error:", err);
+        resolve();
+      });
+    });
+  }
+
   stop(): void {
-    this.abortController?.abort();
     if (this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
     }
+  }
+
+  // ── Clock helpers ──────────────────────────────────────────────────
+
+  private getTeamClock(team: Team): number {
+    return team === "white" ? this.state.clockWhite : this.state.clockBlack;
+  }
+
+  private isClockExpired(team: Team): boolean {
+    return this.getTeamClock(team) <= 0;
+  }
+
+  private startClockTicker(): void {
+    if (this.tickInterval) clearInterval(this.tickInterval);
+    this.tickInterval = setInterval(() => {
+      this.emit({
+        type: "clock:tick",
+        payload: {
+          clockWhite: this.state.clockWhite,
+          clockBlack: this.state.clockBlack,
+        },
+      });
+    }, 1000);
+  }
+
+  private stopClockTicker(): void {
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = null;
+    }
+  }
+
+  // ── Agent picker (avoid repeats) ───────────────────────────────────
+
+  private pickAgent(agents: AgentConfig[], team: Team): AgentConfig {
+    const lastId = this.lastAgentId.get(team);
+    const eligible = agents.length > 1
+      ? agents.filter((a) => a.id !== lastId)
+      : agents;
+    const picked = eligible[Math.floor(Math.random() * eligible.length)];
+    this.lastAgentId.set(team, picked.id);
+    return picked;
   }
 
   // ── Game loop ──────────────────────────────────────────────────────
@@ -218,37 +360,61 @@ export class GameOrchestrator {
         const winner: Team = this.state.currentTurn === "white" ? "black" : "white";
         this.state.phase = "complete";
         this.state.winner = winner;
+        console.log(`[game] Checkmate — ${winner} wins`);
         this.emit({ type: "game:complete", payload: { winner } });
         this.emit({ type: "game:state", payload: this.getState() });
-        return;
+        break;
       }
 
       if (status === "stalemate" || status === "draw") {
         this.state.phase = "complete";
         this.state.winner = "draw";
+        console.log("[game] Draw");
         this.emit({ type: "game:complete", payload: { winner: "draw" } });
         this.emit({ type: "game:state", payload: this.getState() });
-        return;
+        break;
+      }
+
+      if (this.isClockExpired(this.state.currentTurn)) {
+        const winner: Team = this.state.currentTurn === "white" ? "black" : "white";
+        this.state.phase = "complete";
+        this.state.winner = winner;
+        console.log(`[game] ${this.state.currentTurn} ran out of time — ${winner} wins`);
+        this.emit({ type: "game:complete", payload: { winner } });
+        this.emit({ type: "game:state", payload: this.getState() });
+        break;
       }
 
       await this.runTurn();
     }
+
+    // Save game moves
+    if (this.seriesContext) {
+      saveGameMoves(this.seriesContext.seriesId, this.seriesContext.gameIndex, this.getLog());
+    }
+
+    // Post-game deliberation
+    if (this.seriesContext) {
+      await this.runPostGameDeliberation();
+    }
+
+    this.resolveCompletion?.();
   }
 
   private async runTurn(): Promise<void> {
     const team = this.state.currentTurn;
     const teamConfig = team === "white" ? this.config.white : this.config.black;
     const agents = teamConfig.agents;
+    const legalMoves = getLegalMoves(this.state.fen);
+    const isSolo = agents.length === 1;
 
-    // ── 1. Set up deliberation state for this turn ──────────────
+    // ── 1. Set up deliberation state ──────────────────────────────
 
-    const now = Date.now();
     const deliberation: DeliberationState = {
       team,
-      startedAt: now,
-      endsAt: now + this.config.deliberationTimeSec * 1000,
+      startedAt: Date.now(),
       messages: [],
-      tokenUsage: Object.fromEntries(agents.map((a) => [a.id, 0])),
+      activeAgentId: null,
       selectedAgentId: null,
       submittedMove: null,
     };
@@ -258,75 +424,84 @@ export class GameOrchestrator {
 
     this.emit({ type: "game:phase", payload: { phase: "deliberation", team } });
     this.emit({ type: "game:state", payload: this.getState() });
+    this.startClockTicker();
 
-    // ── 2. Start countdown ticker ───────────────────────────────
+    const turnStartClock = this.getTeamClock(team);
+    const turnStartTime = Date.now();
 
-    this.tickInterval = setInterval(() => {
-      const remaining = Math.max(
-        0,
-        Math.ceil((deliberation.endsAt - Date.now()) / 1000)
-      );
+    // ── 2. Agent turn-taking loop ─────────────────────────────────
+
+    let moveSubmitted: string | null = null;
+    let movingAgent: AgentConfig | null = null;
+
+    while (!moveSubmitted) {
+      // Update clock
+      const currentClock = turnStartClock - (Date.now() - turnStartTime);
+      if (team === "white") {
+        this.state.clockWhite = Math.max(0, currentClock);
+      } else {
+        this.state.clockBlack = Math.max(0, currentClock);
+      }
+
+      if (this.getTeamClock(team) <= 0) {
+        console.log(`[${team}] Clock expired during deliberation`);
+        break;
+      }
+
+      // Pick next agent (solo: always the same one)
+      const agent = isSolo ? agents[0] : this.pickAgent(agents, team);
+      deliberation.activeAgentId = agent.id;
+
       this.emit({
-        type: "deliberation:tick",
-        payload: { remainingSec: remaining },
+        type: "deliberation:active_agent",
+        payload: { agentId: agent.id, agentName: agent.name },
       });
-    }, 1000);
 
-    // ── 3. Run agent deliberation in parallel ───────────────────
+      console.log(`[${team}] ${agent.name}'s turn to speak — clock: ${formatClock(this.getTeamClock(team))}`);
 
-    this.abortController = new AbortController();
-    const legalMoves = getLegalMoves(this.state.fen);
+      const result = await this.runAgentTurn(
+        agent, agents, team, deliberation, legalMoves, isSolo
+      );
 
-    const agentPromises = agents.map((agent) =>
-      this.runAgentDeliberation(agent, agents, team, deliberation, legalMoves)
-    );
+      // Update clock after agent finishes
+      const nowElapsed = Date.now() - turnStartTime;
+      if (team === "white") {
+        this.state.clockWhite = Math.max(0, turnStartClock - nowElapsed);
+      } else {
+        this.state.clockBlack = Math.max(0, turnStartClock - nowElapsed);
+      }
 
-    const timerPromise = new Promise<void>((resolve) => {
-      const remaining = deliberation.endsAt - Date.now();
-      setTimeout(() => {
-        this.abortController?.abort();
-        resolve();
-      }, Math.max(0, remaining));
-    });
-
-    await Promise.race([Promise.allSettled(agentPromises), timerPromise]);
-    this.abortController?.abort();
-    await Promise.allSettled(agentPromises);
-
-    if (this.tickInterval) {
-      clearInterval(this.tickInterval);
-      this.tickInterval = null;
+      if (result) {
+        moveSubmitted = result;
+        movingAgent = agent;
+        deliberation.selectedAgentId = agent.id;
+        deliberation.submittedMove = result;
+      }
     }
 
-    // ── 4. Select an agent and get the move ─────────────────────
+    this.stopClockTicker();
 
-    this.state.phase = "move_selection";
-    this.emit({ type: "game:phase", payload: { phase: "move_selection", team } });
+    // ── 3. Fallback if no move submitted ──────────────────────────
 
-    const selectedAgent = agents[Math.floor(Math.random() * agents.length)];
-    deliberation.selectedAgentId = selectedAgent.id;
+    if (!moveSubmitted) {
+      console.warn(`[${team}] No agent submitted a move. Picking random.`);
+      moveSubmitted = legalMoves[Math.floor(Math.random() * legalMoves.length)];
+      movingAgent = agents[0];
+      deliberation.selectedAgentId = movingAgent.id;
+      deliberation.submittedMove = moveSubmitted;
+    }
 
-    this.emit({
-      type: "deliberation:agent_selected",
-      payload: { agentId: selectedAgent.id, agentName: selectedAgent.name },
-    });
+    // ── 4. Apply the move ─────────────────────────────────────────
 
-    const move = await this.requestMove(
-      selectedAgent, agents, team, deliberation, legalMoves
-    );
-
-    deliberation.submittedMove = move;
-
-    // ── 5. Apply the move ───────────────────────────────────────
-
-    const newFen = applyMove(this.state.fen, move);
+    const newFen = applyMove(this.state.fen, moveSubmitted);
     const moveRecord: MoveRecord = {
       turnNumber: this.state.turnNumber,
       team,
-      move,
+      move: moveSubmitted,
       fen: newFen,
-      selectedAgentId: selectedAgent.id,
-      selectedAgentName: selectedAgent.name,
+      timestamp: Date.now(),
+      selectedAgentId: movingAgent!.id,
+      selectedAgentName: movingAgent!.name,
       deliberation: {
         messages: [...deliberation.messages],
         durationMs: Date.now() - deliberation.startedAt,
@@ -339,89 +514,68 @@ export class GameOrchestrator {
     this.state.turnNumber++;
     this.state.deliberation = null;
 
+    console.log(`[${team}] ${movingAgent!.name} submitted ${moveSubmitted} — clocks W:${formatClock(this.state.clockWhite)} B:${formatClock(this.state.clockBlack)}`);
+
     this.emit({ type: "move:submitted", payload: moveRecord });
     this.emit({ type: "game:state", payload: this.getState() });
+
+    // Emit spectator eval (async, non-blocking)
+    getSpectatorEval(newFen)
+      .then((evalResult) => {
+        this.emit({ type: "eval:update", payload: evalResult });
+      })
+      .catch(() => {
+        // Stockfish not available, skip
+      });
   }
 
-  // ── MCP tool factories ─────────────────────────────────────────────
-  // Tools capture closures over the current turn's deliberation state.
-  // A new MCP server is created each turn so tools always reference
-  // the live deliberation object.
+  // ── MCP server for agent turns ────────────────────────────────────
 
-  private createDeliberationServer(
+  private createAgentServer(
     agent: AgentConfig,
     team: Team,
-    deliberation: DeliberationState
-  ) {
-    const orchestrator = this;
-    const abortSignal = this.abortController?.signal;
-
-    const readMessagesTool = tool(
-      "read_messages",
-      "Read all messages from your team's shared message board for this turn.",
-      {},
-      async () => {
-        const msgs = deliberation.messages;
-        if (msgs.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: "(No messages yet — you're first! Share your analysis.)" }],
-          };
-        }
-        const formatted = msgs
-          .map((m) => `[${m.agentName}]: ${m.content}`)
-          .join("\n\n");
-        return { content: [{ type: "text" as const, text: formatted }] };
-      }
-    );
-
-    const postMessageTool = tool(
-      "post_message",
-      "Post a message to your team's shared message board.",
-      { message: z.string().describe("Your chess analysis, candidate moves, or response to teammates") },
-      async (args: { message: string }) => {
-        if (abortSignal?.aborted) {
-          return { content: [{ type: "text" as const, text: "Deliberation time has ended." }] };
-        }
-
-        const msg: BoardMessage = {
-          id: uuidv4(),
-          agentId: agent.id,
-          agentName: agent.name,
-          content: args.message,
-          timestamp: Date.now(),
-          tokenCount: 0,
-          turnNumber: orchestrator.state.turnNumber,
-        };
-
-        deliberation.messages.push(msg);
-        orchestrator.emit({ type: "deliberation:message", payload: msg });
-
-        return { content: [{ type: "text" as const, text: "Message posted." }] };
-      }
-    );
-
-    return createSdkMcpServer({
-      name: `chess-delib-${team}-${agent.name.toLowerCase()}`,
-      tools: [readMessagesTool, postMessageTool],
-    });
-  }
-
-  private createMoveSelectionServer(
-    agent: AgentConfig,
     deliberation: DeliberationState,
     legalMoves: string[],
-    onMoveSubmitted: (move: string) => void
+    onMoveSubmitted: (move: string) => void,
+    isSolo: boolean
   ) {
+    const orchestrator = this;
     const fen = this.state.fen;
 
-    const submitMoveTool = tool(
+    const tools = [];
+
+    if (!isSolo) {
+      tools.push(tool(
+        "post_message",
+        "Post a message to your team's shared message board.",
+        { message: z.string().describe("Your chess analysis or move suggestion (1-3 sentences)") },
+        async (args: { message: string }) => {
+          const msg: BoardMessage = {
+            id: uuidv4(),
+            agentId: agent.id,
+            agentName: agent.name,
+            content: args.message,
+            timestamp: Date.now(),
+            turnNumber: orchestrator.state.turnNumber,
+          };
+
+          deliberation.messages.push(msg);
+          orchestrator.emit({ type: "deliberation:message", payload: msg });
+          console.log(`[${team}] ${agent.name} posted: ${args.message.slice(0, 100)}`);
+
+          return { content: [{ type: "text" as const, text: "Message posted." }] };
+        }
+      ));
+    }
+
+    tools.push(tool(
       "submit_move",
-      "Submit your chosen chess move. Must be in SAN notation and legal.",
+      "Submit the team's chess move. Must be in SAN notation and legal.",
       { move: z.string().describe("Chess move in SAN notation (e.g. e4, Nf3, Bxc6, O-O)") },
       async (args: { move: string }) => {
         if (validateMove(fen, args.move)) {
           onMoveSubmitted(args.move);
-          return { content: [{ type: "text" as const, text: `Move ${args.move} submitted.` }] };
+          return { content: [{ type: "text" as const, text: `Move ${args.move} submitted!` }] };
         }
         return {
           content: [{
@@ -430,180 +584,325 @@ export class GameOrchestrator {
           }],
         };
       }
-    );
-
-    const readMessagesTool = tool(
-      "read_messages",
-      "Read the team's discussion from this turn's deliberation.",
-      {},
-      async () => {
-        const msgs = deliberation.messages;
-        if (msgs.length === 0) {
-          return { content: [{ type: "text" as const, text: "(No discussion this turn)" }] };
-        }
-        const formatted = msgs.map((m) => `[${m.agentName}]: ${m.content}`).join("\n\n");
-        return { content: [{ type: "text" as const, text: formatted }] };
-      }
-    );
+    ));
 
     return createSdkMcpServer({
-      name: `chess-move-${agent.name.toLowerCase()}`,
-      tools: [submitMoveTool, readMessagesTool],
+      name: `chess-${team}-${agent.name.toLowerCase()}`,
+      tools,
     });
   }
 
-  // ── Agent deliberation (persistent session) ────────────────────────
+  // ── Thinking stream helper ──────────────────────────────────────────
+  // Emits the full context stream so spectators can see everything
+  // the agent sees and produces.
 
-  private async runAgentDeliberation(
+  private emitThinking(agentId: string, agentName: string, content: string): void {
+    this.emit({
+      type: "agent:thinking",
+      payload: { agentId, agentName, content },
+    });
+  }
+
+  private streamSdkMessage(
+    msg: any,
+    agent: AgentConfig,
+    team: string,
+    logPrefix: string
+  ): void {
+    // Session init
+    if (msg.type === "system" && msg.subtype === "init") {
+      const sessionId = msg.session_id;
+      if (sessionId) {
+        this.agentSessions.set(agent.id, sessionId);
+        console.log(`[${logPrefix}] ${agent.name} session created: ${sessionId}`);
+      }
+    }
+
+    // Assistant message — text and tool calls
+    if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
+      for (const block of msg.message.content) {
+        if (block.type === "tool_use") {
+          const inputStr = JSON.stringify(block.input ?? {});
+          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${inputStr.slice(0, 200)})`);
+          this.emitThinking(agent.id, agent.name,
+            `\n── ${block.name} ──\n${inputStr}\n`
+          );
+        } else if (block.type === "text" && block.text) {
+          console.log(`[${logPrefix}] ${agent.name} → text: ${block.text.slice(0, 150)}`);
+          this.emitThinking(agent.id, agent.name, block.text + "\n");
+        }
+      }
+    }
+
+    // Tool results (user messages containing tool_result blocks)
+    if (msg.type === "user" && Array.isArray(msg.message?.content)) {
+      for (const block of msg.message.content) {
+        if (block.type === "tool_result") {
+          const resultStr = typeof block.content === "string"
+            ? block.content
+            : Array.isArray(block.content)
+              ? block.content.map((c: any) => c.text ?? "").join("")
+              : JSON.stringify(block.content ?? "");
+          console.log(`[${logPrefix}] ${agent.name} ← result: ${resultStr.slice(0, 200)}`);
+          this.emitThinking(agent.id, agent.name,
+            `← ${resultStr}\n`
+          );
+        }
+      }
+    }
+
+    // Errors
+    if (msg.type === "error" || msg.subtype === "error") {
+      console.error(`[${logPrefix}] ${agent.name} ERROR:`, JSON.stringify(msg).slice(0, 500));
+      this.emitThinking(agent.id, agent.name,
+        `\n⚠ ERROR: ${JSON.stringify(msg).slice(0, 300)}\n`
+      );
+    }
+  }
+
+  // ── Single agent turn ──────────────────────────────────────────────
+
+  private async runAgentTurn(
     agent: AgentConfig,
     teamAgents: AgentConfig[],
     team: Team,
     deliberation: DeliberationState,
-    legalMoves: string[]
-  ): Promise<void> {
-    const abortSignal = this.abortController?.signal;
+    legalMoves: string[],
+    isSolo: boolean
+  ): Promise<string | null> {
     const existingSessionId = this.agentSessions.get(agent.id);
-    const isFirstTurn = !existingSessionId;
+    const isFirstEver = !existingSessionId;
 
-    const server = this.createDeliberationServer(agent, team, deliberation);
+    let submittedMove: string | null = null;
+    const server = this.createAgentServer(
+      agent, team, deliberation, legalMoves,
+      (move) => { submittedMove = move; },
+      isSolo
+    );
 
-    // First turn: full init with system prompt and model.
-    // Subsequent turns: resume the existing session — agent retains
-    // all prior thinking, game history, and teammate impressions.
-    const lastMove = this.state.moveHistory.length > 0
+    const lastOpponentMove = this.state.moveHistory.length > 0
       ? this.state.moveHistory[this.state.moveHistory.length - 1]
       : null;
 
-    const prompt = isFirstTurn
-      ? buildFirstTurnPrompt(this.state.fen, legalMoves)
-      : buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastMove);
+    const prompt = buildAgentTurnPrompt(
+      this.state.fen,
+      legalMoves,
+      this.state.turnNumber,
+      lastOpponentMove,
+      deliberation.messages,
+      this.getTeamClock(team),
+      isFirstEver && this.state.turnNumber === 1,
+      isSolo
+    );
 
-    const options = isFirstTurn
+    // Build allowed tools list based on what's available
+    const allowedTools = isSolo
+      ? ["mcp__chess__submit_move"]
+      : ["mcp__chess__post_message", "mcp__chess__submit_move"];
+
+    // Get personality and notepads for system prompt
+    const personality = agent.personalityId
+      ? getPersonality(agent.personalityId).systemPromptFragment
+      : undefined;
+    const individualNotepad = this.notepads.individual.get(agent.name);
+    const teamNotepad = this.notepads.team.get(team);
+
+    const options = isFirstEver
       ? {
           model: resolveModel(agent.model),
-          systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team),
+          systemPrompt: buildAgentSystemPrompt(
+            agent, teamAgents, team, personality, individualNotepad, teamNotepad
+          ),
           mcpServers: { chess: server },
-          maxTurns: 8,
-          allowedTools: [] as string[],
+          maxTurns: 3,
+          allowedTools,
+          permissionMode: "dontAsk" as const,
         }
       : {
           resume: existingSessionId,
           mcpServers: { chess: server },
-          maxTurns: 8,
+          maxTurns: 3,
+          allowedTools,
+          permissionMode: "dontAsk" as const,
         };
+
+    const agentDeadline = Date.now() + this.config.agentTurnTimeSec * 1000;
+
+    // Emit the full context the agent receives
+    if (isFirstEver) {
+      const sysPrompt = buildAgentSystemPrompt(
+        agent, teamAgents, team, personality, individualNotepad, teamNotepad
+      );
+      this.emitThinking(agent.id, agent.name,
+        `══ SYSTEM PROMPT ══\n${sysPrompt}\n\n`
+      );
+    }
+    this.emitThinking(agent.id, agent.name,
+      `══ TURN ${this.state.turnNumber} PROMPT ══\n${prompt}\n\n── RESPONSE ──\n`
+    );
 
     try {
       for await (const message of query({ prompt, options })) {
-        if (abortSignal?.aborted) break;
-
-        // Capture session ID on first init so we can resume later
-        if (
-          typeof message === "object" &&
-          message !== null &&
-          "type" in message &&
-          (message as any).type === "system" &&
-          (message as any).subtype === "init"
-        ) {
-          const sessionId = (message as any).session_id;
-          if (sessionId) {
-            this.agentSessions.set(agent.id, sessionId);
-          }
+        if (submittedMove) break;
+        if (Date.now() > agentDeadline) {
+          console.log(`[${team}] ${agent.name} hit per-agent time limit`);
+          break;
         }
+        if (this.isClockExpired(team)) break;
 
-        // Capture agent output for the thinking stream viewer
-        if ("result" in message && typeof (message as any).result === "string") {
-          this.emit({
-            type: "agent:thinking",
-            payload: {
-              agentId: agent.id,
-              agentName: agent.name,
-              content: (message as any).result,
-            },
-          });
-        }
+        this.streamSdkMessage(message, agent, team, team);
       }
     } catch (err: any) {
-      if (!abortSignal?.aborted) {
-        console.error(`Agent ${agent.name} deliberation error:`, err);
-      }
+      console.error(`[${team}] ${agent.name} error:`, err?.message ?? err);
     }
+
+    if (submittedMove) {
+      console.log(`[${team}] ${agent.name} submitted move: ${submittedMove}`);
+    } else {
+      console.log(`[${team}] ${agent.name} finished speaking (no move submitted)`);
+    }
+
+    return submittedMove;
   }
 
-  // ── Move selection (resumes agent's persistent session) ────────────
+  // ── Post-game deliberation ─────────────────────────────────────────
 
-  private async requestMove(
-    agent: AgentConfig,
-    teamAgents: AgentConfig[],
-    team: Team,
-    deliberation: DeliberationState,
-    legalMoves: string[]
-  ): Promise<string> {
-    let chosenMove: string | null = null;
-    const sessionId = this.agentSessions.get(agent.id);
+  private async runPostGameDeliberation(): Promise<void> {
+    if (!this.seriesContext) return;
 
-    const server = this.createMoveSelectionServer(
-      agent,
-      deliberation,
-      legalMoves,
-      (move) => { chosenMove = move; }
-    );
+    console.log("[debrief] Starting post-game deliberation...");
+    this.state.phase = "post_game_deliberation";
+    this.emit({ type: "game:phase", payload: { phase: "post_game_deliberation" } });
 
-    const prompt = buildMoveSelectionPrompt(
-      this.state.fen, legalMoves, deliberation.messages
-    );
-
-// Resume the agent's session if we have one — the agent already has
-    // full context from the deliberation phase and all prior turns.
-    const options = sessionId
-      ? {
-          resume: sessionId,
-          mcpServers: { chess: server },
-          maxTurns: 5,
-        }
-      : {
-          model: resolveModel(agent.model),
-          systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team),
-          mcpServers: { chess: server },
-          maxTurns: 5,
-          allowedTools: [] as string[],
-        };
-
+    // Run engine analysis on the full game
+    let whiteAnalysis = "";
+    let blackAnalysis = "";
     try {
-      for await (const message of query({ prompt, options })) {
-        if (chosenMove) break;
-
-        // Capture session ID if this is somehow the first query
-        if (
-          typeof message === "object" &&
-          message !== null &&
-          "type" in message &&
-          (message as any).type === "system" &&
-          (message as any).subtype === "init"
-        ) {
-          const sid = (message as any).session_id;
-          if (sid) this.agentSessions.set(agent.id, sid);
-        }
-
-        if ("result" in message && typeof (message as any).result === "string") {
-          this.emit({
-            type: "agent:thinking",
-            payload: {
-              agentId: agent.id,
-              agentName: agent.name,
-              content: (message as any).result,
-            },
-          });
-        }
-      }
+      console.log("[debrief] Running Stockfish analysis...");
+      const analysis = await analyzeGame(this.state.moveHistory);
+      whiteAnalysis = formatAnalysisSummary(analysis, "white");
+      blackAnalysis = formatAnalysisSummary(analysis, "black");
+      console.log("[debrief] Analysis complete.");
     } catch (err) {
-      console.error(`Agent ${agent.name} move selection error:`, err);
+      console.warn("[debrief] Engine analysis failed, continuing without it:", err);
     }
 
-    if (!chosenMove) {
-      console.warn(`Agent ${agent.name} failed to submit a move. Picking random.`);
-      chosenMove = legalMoves[Math.floor(Math.random() * legalMoves.length)];
+    const allAgents = [
+      ...this.config.white.agents,
+      ...this.config.black.agents,
+    ];
+
+    for (const agent of allAgents) {
+      const team = agent.team;
+      const sessionId = this.agentSessions.get(agent.id);
+      if (!sessionId) {
+        console.warn(`[debrief] No session for ${agent.name}, skipping`);
+        continue;
+      }
+
+      // Load current notepads (may have been updated by a teammate earlier in this loop)
+      const currentIndividual = loadIndividualNotepad(
+        this.seriesContext.seriesId, agent.name
+      )?.content ?? this.notepads.individual.get(agent.name) ?? "";
+
+      const currentTeam = loadTeamNotepad(
+        this.seriesContext.seriesId, team
+      )?.content ?? this.notepads.team.get(team) ?? "";
+
+      const teamAnalysis = team === "white" ? whiteAnalysis : blackAnalysis;
+
+      const prompt = buildPostGamePrompt(
+        this.state.winner, team, currentIndividual, currentTeam, teamAnalysis
+      );
+
+      this.emit({
+        type: "deliberation:active_agent",
+        payload: { agentId: agent.id, agentName: agent.name },
+      });
+
+      console.log(`[debrief] ${agent.name} (${team}) reviewing game...`);
+
+      const server = this.createDebriefServer(agent, team);
+
+      const options = {
+        resume: sessionId,
+        mcpServers: { chess: server },
+        maxTurns: 2,
+        allowedTools: [
+          "mcp__chess__update_individual_notepad",
+          "mcp__chess__update_team_notepad",
+        ],
+        permissionMode: "dontAsk" as const,
+      };
+
+      // Emit the debrief prompt to the thinking stream
+      this.emitThinking(agent.id, agent.name,
+        `\n══ POST-GAME REVIEW ══\n${prompt}\n\n── RESPONSE ──\n`
+      );
+
+      try {
+        for await (const message of query({ prompt, options })) {
+          this.streamSdkMessage(message, agent, team, "debrief");
+        }
+      } catch (err: any) {
+        console.error(`[debrief] ${agent.name} error:`, err?.message ?? err);
+      }
+
+      console.log(`[debrief] ${agent.name} done.`);
     }
 
-    return chosenMove;
+    console.log("[debrief] Post-game deliberation complete.");
+  }
+
+  private createDebriefServer(agent: AgentConfig, team: Team) {
+    const seriesId = this.seriesContext!.seriesId;
+    const orchestrator = this;
+
+    const updateIndividualTool = tool(
+      "update_individual_notepad",
+      `Update your personal notepad (max ${INDIVIDUAL_NOTEPAD_LIMIT} chars). Only you see this across games.`,
+      { content: z.string().describe("Your personal notes for future games") },
+      async (args: { content: string }) => {
+        const trimmed = args.content.slice(0, INDIVIDUAL_NOTEPAD_LIMIT);
+        saveIndividualNotepad(seriesId, agent.name, {
+          agentName: agent.name,
+          content: trimmed,
+          updatedAt: new Date().toISOString(),
+        });
+        orchestrator.notepads.individual.set(agent.name, trimmed);
+        orchestrator.emit({
+          type: "notepad:updated",
+          payload: { agentName: agent.name, team, notepadType: "individual" },
+        });
+        console.log(`[debrief] ${agent.name} updated individual notepad (${trimmed.length} chars)`);
+        return { content: [{ type: "text" as const, text: "Personal notepad updated." }] };
+      }
+    );
+
+    const updateTeamTool = tool(
+      "update_team_notepad",
+      `Update the shared team notepad (max ${TEAM_NOTEPAD_LIMIT} chars). All teammates see this.`,
+      { content: z.string().describe("Team strategy notes for future games") },
+      async (args: { content: string }) => {
+        const trimmed = args.content.slice(0, TEAM_NOTEPAD_LIMIT);
+        saveTeamNotepad(seriesId, team, {
+          team,
+          content: trimmed,
+          updatedAt: new Date().toISOString(),
+        });
+        orchestrator.notepads.team.set(team, trimmed);
+        orchestrator.emit({
+          type: "notepad:updated",
+          payload: { agentName: agent.name, team, notepadType: "team" },
+        });
+        console.log(`[debrief] ${agent.name} updated team notepad (${trimmed.length} chars)`);
+        return { content: [{ type: "text" as const, text: "Team notepad updated." }] };
+      }
+    );
+
+    return createSdkMcpServer({
+      name: `chess-debrief-${agent.name.toLowerCase()}`,
+      tools: [updateIndividualTool, updateTeamTool],
+    });
   }
 }

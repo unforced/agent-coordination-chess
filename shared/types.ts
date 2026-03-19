@@ -2,6 +2,17 @@
 
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
 
+// ── Personalities ───────────────────────────────────────────────────
+
+export type PersonalityId = string;
+
+export interface AgentPersonality {
+  id: PersonalityId;
+  name: string;
+  systemPromptFragment: string;
+  model: ClaudeModel;
+}
+
 // ── Agents ──────────────────────────────────────────────────────────
 
 export interface AgentConfig {
@@ -9,14 +20,31 @@ export interface AgentConfig {
   name: string;
   model: ClaudeModel;
   team: Team;
+  personalityId?: PersonalityId;
 }
 
 export type Team = "white" | "black";
 
 export interface TeamConfig {
   agents: AgentConfig[];
-  tokenBudgetPerTurn: number; // max output tokens per agent per turn for messages
 }
+
+// ── Notepads ────────────────────────────────────────────────────────
+
+export interface IndividualNotepad {
+  agentName: string;
+  content: string; // max 500 chars
+  updatedAt: string;
+}
+
+export interface TeamNotepad {
+  team: Team;
+  content: string; // max 1000 chars
+  updatedAt: string;
+}
+
+export const INDIVIDUAL_NOTEPAD_LIMIT = 500;
+export const TEAM_NOTEPAD_LIMIT = 1000;
 
 // ── Game ─────────────────────────────────────────────────────────────
 
@@ -24,30 +52,36 @@ export interface GameConfig {
   id: string;
   white: TeamConfig;
   black: TeamConfig;
-  deliberationTimeSec: number; // wall clock per turn
+  gameTimeSec: number;
+  agentTurnTimeSec: number;
   createdAt: string;
 }
 
-export type GamePhase = "waiting" | "deliberation" | "move_selection" | "complete";
+export type GamePhase =
+  | "waiting"
+  | "deliberation"
+  | "post_game_deliberation"
+  | "complete";
 
 export interface GameState {
   gameId: string;
-  fen: string; // chess position
+  fen: string;
   moveHistory: MoveRecord[];
   currentTurn: Team;
   phase: GamePhase;
   turnNumber: number;
   winner: Team | "draw" | null;
   deliberation: DeliberationState | null;
+  clockWhite: number;
+  clockBlack: number;
 }
 
 export interface DeliberationState {
   team: Team;
   startedAt: number;
-  endsAt: number;
   messages: BoardMessage[];
-  tokenUsage: Record<string, number>; // agentId -> tokens used this turn
-  selectedAgentId: string | null; // who was picked to move
+  activeAgentId: string | null;
+  selectedAgentId: string | null;
   submittedMove: string | null;
 }
 
@@ -59,7 +93,6 @@ export interface BoardMessage {
   agentName: string;
   content: string;
   timestamp: number;
-  tokenCount: number;
   turnNumber: number;
 }
 
@@ -68,8 +101,9 @@ export interface BoardMessage {
 export interface MoveRecord {
   turnNumber: number;
   team: Team;
-  move: string; // SAN notation e.g. "e4", "Nf3"
-  fen: string; // position after move
+  move: string;
+  fen: string;
+  timestamp: number;
   selectedAgentId: string;
   selectedAgentName: string;
   deliberation: {
@@ -78,19 +112,57 @@ export interface MoveRecord {
   };
 }
 
+// ── Series ──────────────────────────────────────────────────────────
+
+export interface SeriesConfig {
+  id: string;
+  totalGames: number;
+  white: SeriesTeamConfig;
+  black: SeriesTeamConfig;
+  gameTimeSec: number;
+  agentTurnTimeSec: number;
+  createdAt: string;
+}
+
+export interface SeriesTeamConfig {
+  personalityIds: PersonalityId[];
+}
+
+export interface SeriesState {
+  seriesId: string;
+  currentGameIndex: number;
+  currentGameId: string | null;
+  results: GameResult[];
+  status: "in_progress" | "complete";
+}
+
+export interface GameResult {
+  gameIndex: number;
+  gameId: string;
+  winner: Team | "draw" | null;
+  totalMoves: number;
+  durationMs: number;
+  endedAt: string;
+}
+
 // ── WebSocket Events ────────────────────────────────────────────────
 
 export type ServerEvent =
   | { type: "game:state"; payload: GameState }
-  | { type: "game:phase"; payload: { phase: GamePhase; team: Team } }
+  | { type: "game:phase"; payload: { phase: GamePhase; team?: Team } }
   | { type: "deliberation:message"; payload: BoardMessage }
-  | { type: "deliberation:tick"; payload: { remainingSec: number } }
-  | { type: "deliberation:agent_selected"; payload: { agentId: string; agentName: string } }
+  | { type: "deliberation:active_agent"; payload: { agentId: string; agentName: string } }
+  | { type: "clock:tick"; payload: { clockWhite: number; clockBlack: number } }
   | { type: "move:submitted"; payload: MoveRecord }
   | { type: "game:complete"; payload: { winner: Team | "draw" } }
-  | { type: "agent:thinking"; payload: { agentId: string; agentName: string; content: string } };
+  | { type: "agent:thinking"; payload: { agentId: string; agentName: string; content: string } }
+  | { type: "game:config"; payload: GameConfig }
+  | { type: "eval:update"; payload: { score: number; mate: number | null } }
+  | { type: "series:state"; payload: SeriesState }
+  | { type: "notepad:updated"; payload: { agentName: string; team: Team; notepadType: "individual" | "team" } };
 
 export type ClientEvent =
   | { type: "game:create"; payload: { config: Omit<GameConfig, "id" | "createdAt"> } }
   | { type: "game:start"; payload: { gameId: string } }
-  | { type: "game:subscribe"; payload: { gameId: string } };
+  | { type: "game:subscribe"; payload: { gameId: string } }
+  | { type: "series:subscribe"; payload: { seriesId: string } };
