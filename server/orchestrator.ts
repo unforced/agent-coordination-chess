@@ -58,14 +58,12 @@ function buildTurnPrompt(
 ): string {
   const ascii = boardToAscii(fen);
 
-  // Recent game log — show moves from both sides, but only YOUR team's chat
   let gameLog = "";
   const movesToShow = recentMoves.slice(-4);
   if (movesToShow.length > 0) {
     gameLog = "\nRECENT MOVES:\n";
     for (const m of movesToShow) {
       gameLog += `  ${m.team === "white" ? "W" : "B"} Turn ${m.turnNumber}: ${m.selectedAgentName} played ${m.move}`;
-      // Only show your own team's deliberation, not the opponent's
       if (m.team === team && m.deliberation.messages.length > 0) {
         const teamChat = m.deliberation.messages.map((msg) => `${msg.agentName}: ${msg.content}`).join(" | ");
         gameLog += ` [your team said: ${teamChat.slice(0, 200)}]`;
@@ -74,7 +72,6 @@ function buildTurnPrompt(
     }
   }
 
-  // Current turn's discussion so far
   const msgSection = !isSolo && currentMessages.length > 0
     ? `\nTEAM CHAT THIS TURN:\n${currentMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}` : "";
 
@@ -151,10 +148,7 @@ export class GameOrchestrator {
   getConfig(): GameConfig { return this.config; }
   getLog(): MoveRecord[] { return [...this.state.moveHistory]; }
   getResult() { return { winner: this.state.winner, totalMoves: this.state.moveHistory.length }; }
-
-  getProfile(name: string): AgentProfile | null {
-    return this.profiles.get(name) ?? loadAgentProfile(name);
-  }
+  getProfile(name: string) { return this.profiles.get(name) ?? loadAgentProfile(name); }
 
   async runToCompletion(): Promise<void> {
     if (this.state.phase !== "waiting") throw new Error("Already started");
@@ -167,7 +161,6 @@ export class GameOrchestrator {
   stop() { if (this.tickInterval) { clearInterval(this.tickInterval); this.tickInterval = null; } }
 
   // ── Clock ──────────────────────────────────────────────────────────
-
   private getTeamClock(t: Team) { return t === "white" ? this.state.clockWhite : this.state.clockBlack; }
   private isClockExpired(t: Team) { return this.getTeamClock(t) <= 0; }
   private startClockTicker() {
@@ -193,78 +186,83 @@ export class GameOrchestrator {
   }
 
   /**
-   * Process an SDK message. Captures thinking, text, and tool use.
-   * Returns any text content from the assistant (to auto-post as message).
+   * Process an SDK event with incremental streaming.
+   * Tracks state to emit deltas for text blocks and detect new content.
+   * Returns text content if the agent produced spoken text.
    */
-  private streamSdkMessage(msg: any, agent: AgentConfig, logPrefix: string): string | null {
+  private processStreamEvent(
+    event: any, agent: AgentConfig, logPrefix: string,
+    streamState: { currentText: string; seenThinking: Set<string>; seenTools: Set<string> }
+  ): string | null {
     let textContent: string | null = null;
+    const eventType = event.type;
 
-    if (msg.type === "system" && msg.subtype === "init") {
-      const sid = msg.session_id;
+    // Session init
+    if (eventType === "system" && event.subtype === "init") {
+      const sid = event.session_id;
       if (sid) { this.agentSessions.set(agent.id, sid); console.log(`[${logPrefix}] ${agent.name} session: ${sid}`); }
     }
 
-    if (msg.type !== "system") {
-      console.log(`[${logPrefix}] ${agent.name} msg: type=${msg.type} subtype=${msg.subtype ?? "-"}`);
-    }
-
-    // ── assistant message: thinking + text + tool_use blocks ──
-    if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
-      for (const block of msg.message.content) {
+    // Assistant message — streams incrementally, content blocks update over time
+    if (eventType === "assistant" && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content) {
         if (block.type === "thinking" && block.thinking) {
-          console.log(`[${logPrefix}] ${agent.name} thinking(${block.thinking.length} chars)`);
-          this.emitThinking(agent.id, agent.name,
-            `┌─ THINKING ─────────────────────────\n│ ${block.thinking.replace(/\n/g, "\n│ ")}\n└────────────────────────────────────\n\n`
-          );
-        } else if (block.type === "tool_use") {
-          const input = block.input ?? {};
-          const inputFormatted = JSON.stringify(input, null, 2);
-          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${JSON.stringify(input).slice(0, 200)})`);
-          this.emitThinking(agent.id, agent.name,
-            `▶ TOOL: ${block.name}\n${inputFormatted}\n\n`
-          );
+          // Thinking blocks arrive whole — dedupe by content hash
+          const key = block.thinking.slice(0, 50);
+          if (!streamState.seenThinking.has(key)) {
+            streamState.seenThinking.add(key);
+            console.log(`[${logPrefix}] ${agent.name} thinking(${block.thinking.length} chars)`);
+            this.emitThinking(agent.id, agent.name,
+              `┌─ THINKING ─────────────────────────\n│ ${block.thinking.replace(/\n/g, "\n│ ")}\n└────────────────────────────────────\n\n`
+            );
+          }
         } else if (block.type === "text" && block.text) {
-          console.log(`[${logPrefix}] ${agent.name} says: ${block.text.slice(0, 150)}`);
-          this.emitThinking(agent.id, agent.name,
-            `💬 TEXT (shared with team):\n${block.text}\n\n`
-          );
-          textContent = block.text;
+          // Text grows incrementally — emit the delta
+          const newText = block.text;
+          if (newText.length > streamState.currentText.length) {
+            const delta = newText.slice(streamState.currentText.length);
+            streamState.currentText = newText;
+            // Stream the delta directly (no framing — just the text as it arrives)
+            this.emitThinking(agent.id, agent.name, delta);
+          }
+          textContent = newText;
+        } else if (block.type === "tool_use") {
+          const toolKey = `${block.name}:${block.id ?? JSON.stringify(block.input).slice(0, 30)}`;
+          if (!streamState.seenTools.has(toolKey)) {
+            streamState.seenTools.add(toolKey);
+            const inputFormatted = JSON.stringify(block.input ?? {}, null, 2);
+            console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${JSON.stringify(block.input ?? {}).slice(0, 200)})`);
+            this.emitThinking(agent.id, agent.name,
+              `\n▶ TOOL: ${block.name}\n${inputFormatted}\n\n`
+            );
+          }
         }
       }
     }
 
-    // ── user message: tool results ──
-    if (msg.type === "user" && Array.isArray(msg.message?.content)) {
-      for (const block of msg.message.content) {
+    // Tool results
+    if (eventType === "user" && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content) {
         if (block.type === "tool_result") {
           const r = typeof block.content === "string" ? block.content
             : Array.isArray(block.content) ? block.content.map((c: any) => c.text ?? "").join("") : "";
-          this.emitThinking(agent.id, agent.name,
-            `◀ RESULT: ${r}\n\n`
-          );
+          this.emitThinking(agent.id, agent.name, `◀ RESULT: ${r}\n\n`);
         }
       }
     }
 
-    // ── result: final agent output (fallback if no assistant text) ──
-    if (msg.type === "result" && msg.subtype === "success" && typeof msg.result === "string" && msg.result.length > 0) {
-      if (!textContent) {
-        console.log(`[${logPrefix}] ${agent.name} result text: ${msg.result.slice(0, 150)}`);
-        this.emitThinking(agent.id, agent.name,
-          `💬 TEXT (shared with team):\n${msg.result}\n\n`
-        );
-        textContent = msg.result;
-      }
-    } else if (msg.type === "result") {
-      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype} len=${msg.result?.length ?? 0}`);
-      if (msg.subtype === "error") {
-        this.emitThinking(agent.id, agent.name, `⚠ ERROR: ${msg.error ?? "unknown"}\n\n`);
+    // Result — final output, use as fallback if no text was streamed
+    if (eventType === "result" && event.subtype === "success" && typeof event.result === "string" && event.result.length > 0) {
+      if (!textContent && streamState.currentText.length === 0) {
+        console.log(`[${logPrefix}] ${agent.name} result text: ${event.result.slice(0, 150)}`);
+        this.emitThinking(agent.id, agent.name, event.result + "\n\n");
+        textContent = event.result;
       }
     }
 
-    if (msg.type === "error" || (msg.subtype === "error" && msg.type !== "result")) {
-      console.error(`[${logPrefix}] ${agent.name} ERROR:`, JSON.stringify(msg).slice(0, 500));
-      this.emitThinking(agent.id, agent.name, `⚠ ERROR: ${JSON.stringify(msg).slice(0, 300)}\n\n`);
+    if (eventType === "error" || event.subtype === "error") {
+      console.error(`[${logPrefix}] ${agent.name} ERROR:`, JSON.stringify(event).slice(0, 500));
+      this.emitThinking(agent.id, agent.name, `⚠ ERROR: ${JSON.stringify(event).slice(0, 300)}\n\n`);
     }
 
     return textContent;
@@ -329,7 +327,6 @@ export class GameOrchestrator {
     let moveSubmitted: string | null = null;
     let movingAgent: AgentConfig | null = null;
 
-    // Agents rotate freely until someone submits or the clock runs out
     while (!moveSubmitted) {
       const elapsed = Date.now() - turnStartTime;
       if (team === "white") this.state.clockWhite = Math.max(0, turnStartClock - elapsed);
@@ -340,9 +337,7 @@ export class GameOrchestrator {
       deliberation.activeAgentId = agent.id;
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
 
-      const result = await this.runAgentTurn(
-        agent, agents, team, deliberation, legalMoves, isSolo
-      );
+      const result = await this.runAgentTurn(agent, agents, team, deliberation, legalMoves, isSolo);
 
       const nowElapsed = Date.now() - turnStartTime;
       if (team === "white") this.state.clockWhite = Math.max(0, turnStartClock - nowElapsed);
@@ -377,11 +372,9 @@ export class GameOrchestrator {
     getSpectatorEval(newFen).then((ev) => this.emit({ type: "eval:update", payload: ev })).catch(() => {});
   }
 
-  // ── MCP: game turn (only submit_move) ──────────────────────────────
+  // ── MCP: game turn ─────────────────────────────────────────────────
 
-  private createGameServer(
-    legalMoves: string[], onMove: (m: string) => void
-  ) {
+  private createGameServer(legalMoves: string[], onMove: (m: string) => void) {
     const fen = this.state.fen;
     return createSdkMcpServer({
       name: "chess",
@@ -397,8 +390,7 @@ export class GameOrchestrator {
     });
   }
 
-  // ── Agent game turn ────────────────────────────────────────────────
-  // Text output = auto-posted to team message board
+  // ── Agent game turn (with streaming) ───────────────────────────────
 
   private async runAgentTurn(
     agent: AgentConfig, teamAgents: AgentConfig[], team: Team,
@@ -438,35 +430,33 @@ export class GameOrchestrator {
         `╔══════════════════════════════════╗\n║  SYSTEM PROMPT                   ║\n╚══════════════════════════════════╝\n${(options as any).systemPrompt}\n\n`);
     }
     this.emitThinking(agent.id, agent.name,
-      `╔══════════════════════════════════╗\n║  TURN ${this.state.turnNumber} — PROMPT                 ║\n╚══════════════════════════════════╝\n${prompt}\n\n`);
+      `╔══════════════════════════════════╗\n║  TURN ${this.state.turnNumber}                          ║\n╚══════════════════════════════════╝\n${prompt}\n\n`);
 
-    let messageCount = 0;
+    // Streaming state — tracks incremental updates
+    const streamState = { currentText: "", seenThinking: new Set<string>(), seenTools: new Set<string>() };
+    let lastTextContent: string | null = null;
+
     try {
-      for await (const message of query({ prompt, options })) {
-        messageCount++;
+      for await (const event of query({ prompt, options })) {
         if (submittedMove) break;
         if (Date.now() > agentDeadline || this.isClockExpired(team)) break;
 
-        const textContent = this.streamSdkMessage(message, agent, team);
-
-        // Auto-post text to team message board
-        if (textContent && !isSolo) {
-          const msg: BoardMessage = {
-            id: uuidv4(), agentId: agent.id, agentName: agent.name,
-            content: textContent, timestamp: Date.now(), turnNumber: this.state.turnNumber,
-          };
-          deliberation.messages.push(msg);
-          this.emit({ type: "deliberation:message", payload: msg });
-        }
+        const textContent = this.processStreamEvent(event, agent, team, streamState);
+        if (textContent) lastTextContent = textContent;
       }
     } catch (err: any) { console.error(`[${team}] ${agent.name} error:`, err?.message ?? err); }
 
-    if (messageCount === 0) {
-      console.warn(`[${team}] ${agent.name} produced NO messages (0 from query stream)`);
-    } else {
-      console.log(`[${team}] ${agent.name} produced ${messageCount} messages, submitted=${!!submittedMove}`);
+    // Auto-post the agent's final text to team message board
+    if (lastTextContent && !isSolo) {
+      const msg: BoardMessage = {
+        id: uuidv4(), agentId: agent.id, agentName: agent.name,
+        content: lastTextContent, timestamp: Date.now(), turnNumber: this.state.turnNumber,
+      };
+      deliberation.messages.push(msg);
+      this.emit({ type: "deliberation:message", payload: msg });
     }
 
+    console.log(`[${team}] ${agent.name} done: text=${lastTextContent?.length ?? 0} chars, move=${submittedMove ?? "none"}`);
     return submittedMove;
   }
 
@@ -484,7 +474,7 @@ export class GameOrchestrator {
 
     const allAgents = [...this.config.white.agents, ...this.config.black.agents];
 
-    // ── Phase 1: Private reflection, text auto-shared ────────────
+    // ── Phase 1: Reflection ──────────────────────────────────────
     this.state.phase = "post_game_reflection";
     this.emit({ type: "game:phase", payload: { phase: "post_game_reflection" } });
     this.postGameMessages = [];
@@ -511,24 +501,28 @@ export class GameOrchestrator {
         thinking: { type: "enabled" as const, budgetTokens: 5000 },
       };
 
+      const streamState = { currentText: "", seenThinking: new Set<string>(), seenTools: new Set<string>() };
+      let lastText: string | null = null;
+
       try {
-        for await (const message of query({ prompt, options })) {
-          const textContent = this.streamSdkMessage(message, agent, "postgame");
-          // Auto-post text to shared postgame board
-          if (textContent) {
-            const msg: BoardMessage = {
-              id: uuidv4(), agentId: agent.id, agentName: agent.name,
-              content: textContent, timestamp: Date.now(), turnNumber: 0,
-            };
-            this.postGameMessages.push(msg);
-            this.emit({ type: "postgame:message", payload: msg });
-            savePostgameMessage(msg.id, this.config.gameNumber, agent.name, textContent, msg.timestamp);
-          }
+        for await (const event of query({ prompt, options })) {
+          const text = this.processStreamEvent(event, agent, "postgame", streamState);
+          if (text) lastText = text;
         }
       } catch (err: any) { console.error(`[postgame] ${agent.name} error:`, err?.message ?? err); }
+
+      if (lastText) {
+        const msg: BoardMessage = {
+          id: uuidv4(), agentId: agent.id, agentName: agent.name,
+          content: lastText, timestamp: Date.now(), turnNumber: 0,
+        };
+        this.postGameMessages.push(msg);
+        this.emit({ type: "postgame:message", payload: msg });
+        savePostgameMessage(msg.id, this.config.gameNumber, agent.name, lastText, msg.timestamp);
+      }
     }
 
-    // ── Phase 2: Discussion — read everyone's reflections ────────
+    // ── Phase 2: Discussion ──────────────────────────────────────
     this.state.phase = "post_game_discussion";
     this.emit({ type: "game:phase", payload: { phase: "post_game_discussion" } });
 
@@ -550,23 +544,28 @@ export class GameOrchestrator {
         thinking: { type: "enabled" as const, budgetTokens: 3000 },
       };
 
+      const streamState = { currentText: "", seenThinking: new Set<string>(), seenTools: new Set<string>() };
+      let lastText: string | null = null;
+
       try {
-        for await (const message of query({ prompt: discussionPrompt, options })) {
-          const textContent = this.streamSdkMessage(message, agent, "discussion");
-          if (textContent) {
-            const msg: BoardMessage = {
-              id: uuidv4(), agentId: agent.id, agentName: agent.name,
-              content: textContent, timestamp: Date.now(), turnNumber: 0,
-            };
-            this.postGameMessages.push(msg);
-            this.emit({ type: "postgame:message", payload: msg });
-            savePostgameMessage(msg.id, this.config.gameNumber, agent.name, textContent, msg.timestamp);
-          }
+        for await (const event of query({ prompt: discussionPrompt, options })) {
+          const text = this.processStreamEvent(event, agent, "discussion", streamState);
+          if (text) lastText = text;
         }
       } catch (err: any) { console.error(`[discussion] ${agent.name} error:`, err?.message ?? err); }
+
+      if (lastText) {
+        const msg: BoardMessage = {
+          id: uuidv4(), agentId: agent.id, agentName: agent.name,
+          content: lastText, timestamp: Date.now(), turnNumber: 0,
+        };
+        this.postGameMessages.push(msg);
+        this.emit({ type: "postgame:message", payload: msg });
+        savePostgameMessage(msg.id, this.config.gameNumber, agent.name, lastText, msg.timestamp);
+      }
     }
 
-    // Snapshot all memories
+    // Snapshot memories
     for (const agent of allAgents) {
       snapshotMemory(agent.name, this.config.gameNumber);
     }
@@ -580,8 +579,8 @@ export class GameOrchestrator {
       name: "chess",
       tools: [
         tool("update_memory",
-          `Rewrite your memory (max ${MEMORY_LIMIT} chars). This replaces your entire memory and carries across all future games.`,
-          { content: z.string().describe("Your updated memory — insights, strategies, notes on players") },
+          `Rewrite your memory (max ${MEMORY_LIMIT} chars). Carries across all future games.`,
+          { content: z.string().describe("Your updated memory") },
           async (args: { content: string }) => {
             const trimmed = args.content.slice(0, MEMORY_LIMIT);
             const profile = orchestrator.profiles.get(agent.name) ?? {
@@ -591,7 +590,7 @@ export class GameOrchestrator {
             orchestrator.profiles.set(agent.name, profile);
             saveAgentProfile(profile);
             orchestrator.emit({ type: "agent:profile", payload: profile });
-            console.log(`[postgame] ${agent.name} updated memory (${trimmed.length}/${MEMORY_LIMIT} chars)`);
+            console.log(`[postgame] ${agent.name} memory updated (${trimmed.length}/${MEMORY_LIMIT})`);
             return { content: [{ type: "text" as const, text: `Memory updated (${trimmed.length}/${MEMORY_LIMIT} chars).` }] };
           }
         ),
