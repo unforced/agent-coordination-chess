@@ -49,7 +49,13 @@ HOW THIS WORKS:
 - Everything you say out loud is shared with your team${isSolo ? "" : "mates"} on the message board.
 - Use your thinking to analyze deeply. Use your words to communicate clearly.
 - To make a move, call the submit_move tool.${isSolo ? "" : " Any teammate can submit."}
-
+${isSolo ? "" : `
+TEAMWORK:
+- Read what your teammates have said and respond to their ideas.
+- If a teammate made a mistake last turn, discuss it — help each other improve.
+- Build on each other's analysis. Agree, disagree, or refine.
+- When the team seems aligned on a move, someone should submit it.
+`}
 After each game, you'll reflect and can update your memory.
 Your memory persists across games — use it to track what you've learned about chess, your teammates, opponents, and strategies that work.`;
 
@@ -58,16 +64,31 @@ Your memory persists across games — use it to track what you've learned about 
 
 function buildTurnPrompt(
   fen: string, legalMoves: string[], turnNumber: number,
-  lastOpponentMove: MoveRecord | null, messages: BoardMessage[],
+  recentMoves: MoveRecord[], currentMessages: BoardMessage[],
   clockRemaining: number, isFirstEver: boolean, isSolo: boolean
 ): string {
   const ascii = boardToAscii(fen);
-  const lastInfo = lastOpponentMove
-    ? `\nOpponent: ${lastOpponentMove.selectedAgentName} played ${lastOpponentMove.move}.` : "";
-  const msgSection = !isSolo && messages.length > 0
-    ? `\nTEAM CHAT:\n${messages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}` : "";
 
-  return `${isFirstEver ? "Game begins! " : `Turn ${turnNumber}. `}Your move.${lastInfo}
+  // Recent game log — last few moves with who played and what teammates discussed
+  let gameLog = "";
+  const movesToShow = recentMoves.slice(-4); // last 4 moves
+  if (movesToShow.length > 0) {
+    gameLog = "\nRECENT MOVES:\n";
+    for (const m of movesToShow) {
+      gameLog += `  ${m.team === "white" ? "W" : "B"} Turn ${m.turnNumber}: ${m.selectedAgentName} played ${m.move}`;
+      if (m.deliberation.messages.length > 0) {
+        const teamChat = m.deliberation.messages.map((msg) => `${msg.agentName}: ${msg.content}`).join(" | ");
+        gameLog += ` [team said: ${teamChat.slice(0, 200)}]`;
+      }
+      gameLog += "\n";
+    }
+  }
+
+  // Current turn's discussion so far
+  const msgSection = !isSolo && currentMessages.length > 0
+    ? `\nTEAM CHAT THIS TURN:\n${currentMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}` : "";
+
+  return `${isFirstEver ? "Game begins! " : `Turn ${turnNumber}. `}Your team's move.
 
 \`\`\`
 ${ascii}
@@ -75,9 +96,9 @@ ${ascii}
 FEN: ${fen}
 LEGAL MOVES: ${legalMoves.join(", ")}
 CLOCK: ${formatClock(clockRemaining)}
-${msgSection}
+${gameLog}${msgSection}
 
-Share your brief analysis, then call submit_move to make the move. Your text is shared with teammates. The move only counts when you call submit_move.`;
+Respond to your teammates if they've spoken. Share your analysis briefly — what move do you recommend and why? If you're ready to commit, call submit_move. Your text is shared with your team.`;
 }
 
 function buildReflectionPrompt(
@@ -377,9 +398,9 @@ export class GameOrchestrator {
     let submittedMove: string | null = null;
     const server = this.createGameServer(legalMoves, (m) => { submittedMove = m; });
 
-    const lastMove = this.state.moveHistory.length > 0 ? this.state.moveHistory[this.state.moveHistory.length - 1] : null;
-    const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastMove,
-      deliberation.messages, this.getTeamClock(team), isFirstEver && this.state.turnNumber === 1, isSolo);
+    const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber,
+      this.state.moveHistory, deliberation.messages, this.getTeamClock(team),
+      isFirstEver && this.state.turnNumber === 1, isSolo);
 
     const memory = this.profiles.get(agent.name)?.memory ?? "";
     const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
