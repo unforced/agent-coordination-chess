@@ -197,6 +197,9 @@ export class GameOrchestrator {
     let textContent: string | null = null;
     const eventType = event.type;
 
+    // Log ALL events for debugging
+    console.log(`[${logPrefix}] ${agent.name} event: type=${eventType} subtype=${event.subtype ?? "-"} content_blocks=${Array.isArray(event.message?.content) ? event.message.content.length : "-"}`);
+
     // Session init
     if (eventType === "system" && event.subtype === "init") {
       const sid = event.session_id;
