@@ -235,8 +235,18 @@ export class GameOrchestrator {
       }
     }
 
-    if (msg.type === "result") {
-      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype}`);
+    // Result message — may contain text we haven't seen in assistant blocks
+    if (msg.type === "result" && msg.subtype === "success" && typeof msg.result === "string" && msg.result.length > 0) {
+      // Only use result text if we didn't already capture it from assistant blocks
+      if (!textContent) {
+        console.log(`[${logPrefix}] ${agent.name} result text: ${msg.result.slice(0, 150)}`);
+        this.emitThinking(agent.id, agent.name, `📢 ${msg.result}\n\n`);
+        textContent = msg.result;
+      } else {
+        console.log(`[${logPrefix}] ${agent.name} result: (already captured from assistant blocks)`);
+      }
+    } else if (msg.type === "result") {
+      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype} len=${msg.result?.length ?? 0}`);
     }
 
     if (msg.type === "error" || msg.subtype === "error") {
