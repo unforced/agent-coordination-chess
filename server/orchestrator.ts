@@ -36,28 +36,18 @@ function buildSystemPrompt(
   const isSolo = teamAgents.length === 1;
   const personality = agent.personalityId ? getPersonality(agent.personalityId).systemPromptFragment : "";
 
-  let p = `You are ${agent.name}, playing ${team.toUpperCase()} in a chess game.
-${teammates ? `TEAMMATES: ${teammates}` : "Playing solo."}
+  let p = `You are ${agent.name}, playing ${team.toUpperCase()}.
+${teammates ? `Teammates: ${teammates}` : "Solo."}
 
 ${personality}
-
-YOUR MEMORY (${memory.length}/${MEMORY_LIMIT} chars):
-${memory || "(empty — you haven't formed any memories yet)"}
-
-HOW THIS WORKS:
-- You think carefully using extended thinking, then speak.
-- Everything you say out loud is shared with your team${isSolo ? "" : "mates"} on the message board.
-- Use your thinking to analyze deeply. Use your words to communicate clearly.
-- To make a move, call the submit_move tool.${isSolo ? "" : " Any teammate can submit."}
-${isSolo ? "" : `
-TEAMWORK:
-- Read what your teammates have said and respond to their ideas.
-- If a teammate made a mistake last turn, discuss it — help each other improve.
-- Build on each other's analysis. Agree, disagree, or refine.
-- When the team seems aligned on a move, someone should submit it.
-`}
-After each game, you'll reflect and can update your memory.
-Your memory persists across games — use it to track what you've learned about chess, your teammates, opponents, and strategies that work.`;
+${memory ? `\nYOUR MEMORY:\n${memory}\n` : ""}
+CRITICAL RULES:
+- Keep messages to 1-2 sentences. No essays. No bullet points. No headers.
+- Do your deep analysis in your THINKING. Your spoken words should be short and direct.
+- ONLY the submit_move TOOL makes a move. Saying "I play e4" does NOTHING. You must call the submit_move tool.
+- If you just want to share your opinion without moving, speak briefly and do NOT call submit_move.
+${isSolo ? "" : `- Read teammates' messages and respond. Build on their ideas. Disagree if you see something different.
+- When the team aligns, one person should call submit_move.`}`;
 
   return p;
 }
@@ -98,7 +88,7 @@ LEGAL MOVES: ${legalMoves.join(", ")}
 CLOCK: ${formatClock(clockRemaining)}
 ${gameLog}${msgSection}
 
-Your words are shared with your team. Respond to teammates, share your analysis, or suggest a move. If you feel confident, call submit_move — otherwise, contribute your thinking and let the discussion continue.`;
+1-2 sentences only. To make a move, call submit_move. Talking about a move does NOT play it.`;
 }
 
 function buildReflectionPrompt(
@@ -112,18 +102,16 @@ ${engineAnalysis}
 YOUR MEMORY (${memory.length}/${MEMORY_LIMIT} chars):
 ${memory || "(empty)"}
 
-Reflect on this game. Everything you say will be shared with all players.
-
-Then use update_memory to save what you've learned. Your memory carries across all future games — record observations about opponents, teammates, strategies that work, mistakes to avoid. If your memory is getting long, rewrite it more concisely, keeping only the most valuable insights.`;
+Share a brief reflection (1-3 sentences) — it will be shared with all players. Then call update_memory to save learnings for future games. If memory is getting long, compact it to keep only the most important insights.`;
 }
 
 function buildDiscussionPrompt(postGameMessages: BoardMessage[]): string {
   const chat = postGameMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n");
-  return `Everyone has shared their reflections:
+  return `Everyone's reflections:
 
 ${chat}
 
-Respond to what others said. You can update_memory if their feedback changes your thinking. This is your words will be shared with all players.`;
+Respond briefly (1-2 sentences). You can call update_memory if their feedback changes your thinking.`;
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
