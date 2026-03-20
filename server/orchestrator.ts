@@ -41,13 +41,11 @@ ${teammates ? `Teammates: ${teammates}` : "Solo."}
 
 ${personality}
 ${memory ? `\nYOUR MEMORY:\n${memory}\n` : ""}
-CRITICAL RULES:
-- Keep messages to 1-2 sentences. No essays. No bullet points. No headers.
-- Do your deep analysis in your THINKING. Your spoken words should be short and direct.
-- ONLY the submit_move TOOL makes a move. Saying "I play e4" does NOTHING. You must call the submit_move tool.
-- If you just want to share your opinion without moving, speak briefly and do NOT call submit_move.
-${isSolo ? "" : `- Read teammates' messages and respond. Build on their ideas. Disagree if you see something different.
-- When the team aligns, one person should call submit_move.`}`;
+HOW TO PLAY:
+- Think deeply in your extended thinking. Keep your spoken messages short (1-2 sentences).
+- ONLY the submit_move tool makes a move. Saying "I play e4" in text does nothing — you must call the tool.
+- If you're not ready to commit, just share your thoughts and let the conversation continue.
+${isSolo ? "" : `- Your teammates can see what you say. Talk to them.`}`;
 
   return p;
 }
@@ -55,20 +53,22 @@ ${isSolo ? "" : `- Read teammates' messages and respond. Build on their ideas. D
 function buildTurnPrompt(
   fen: string, legalMoves: string[], turnNumber: number,
   recentMoves: MoveRecord[], currentMessages: BoardMessage[],
-  clockRemaining: number, isFirstEver: boolean, isSolo: boolean
+  clockRemaining: number, isFirstEver: boolean, isSolo: boolean,
+  team: Team
 ): string {
   const ascii = boardToAscii(fen);
 
-  // Recent game log — last few moves with who played and what teammates discussed
+  // Recent game log — show moves from both sides, but only YOUR team's chat
   let gameLog = "";
-  const movesToShow = recentMoves.slice(-4); // last 4 moves
+  const movesToShow = recentMoves.slice(-4);
   if (movesToShow.length > 0) {
     gameLog = "\nRECENT MOVES:\n";
     for (const m of movesToShow) {
       gameLog += `  ${m.team === "white" ? "W" : "B"} Turn ${m.turnNumber}: ${m.selectedAgentName} played ${m.move}`;
-      if (m.deliberation.messages.length > 0) {
+      // Only show your own team's deliberation, not the opponent's
+      if (m.team === team && m.deliberation.messages.length > 0) {
         const teamChat = m.deliberation.messages.map((msg) => `${msg.agentName}: ${msg.content}`).join(" | ");
-        gameLog += ` [team said: ${teamChat.slice(0, 200)}]`;
+        gameLog += ` [your team said: ${teamChat.slice(0, 200)}]`;
       }
       gameLog += "\n";
     }
@@ -388,7 +388,7 @@ export class GameOrchestrator {
 
     const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber,
       this.state.moveHistory, deliberation.messages, this.getTeamClock(team),
-      isFirstEver && this.state.turnNumber === 1, isSolo);
+      isFirstEver && this.state.turnNumber === 1, isSolo, team);
 
     const memory = this.profiles.get(agent.name)?.memory ?? "";
     const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
