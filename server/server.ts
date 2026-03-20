@@ -7,8 +7,8 @@ import type { ServerEvent, ClientEvent } from "../shared/types.js";
 import { startArena, getCurrentOrchestrator, getArenaState, onArenaStateChange } from "./arena.js";
 import {
   loadAgentProfile, loadAllAgentProfiles, loadRecentGames,
-  loadGameByNumber, loadAgentStats, loadRecentNotepads,
-  loadPostgameMessages, loadAllAgentNotes, loadProfileHistory,
+  loadGameByNumber, loadAgentStats,
+  loadPostgameMessages, loadMemoryHistory,
 } from "./persistence.js";
 
 // ── WebSocket subscribers ────────────────────────────────────────────
@@ -50,11 +50,6 @@ app.get("/api/agents", (_req, res) => {
   const enriched = profiles.map((p) => ({
     ...p,
     stats: loadAgentStats(p.name),
-    recentNotepads: loadRecentNotepads(p.name, 5).map((n) => ({
-      gameNumber: n.gameNumber,
-      content: n.content,
-    })),
-    notes: loadAllAgentNotes(p.name),
   }));
   res.json(enriched);
 });
@@ -64,11 +59,8 @@ app.get("/api/agents/:name", (req, res) => {
   if (!profile) { res.status(404).json({ error: "Agent not found" }); return; }
 
   const stats = loadAgentStats(req.params.name);
-  const notepads = loadRecentNotepads(req.params.name, 10);
-  const notes = loadAllAgentNotes(req.params.name);
-
-  const history = loadProfileHistory(req.params.name);
-  res.json({ ...profile, stats, notepads, notes, history });
+  const history = loadMemoryHistory(req.params.name);
+  res.json({ ...profile, stats, history });
 });
 
 // Game history

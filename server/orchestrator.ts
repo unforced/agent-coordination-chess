@@ -2,217 +2,107 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import {
-  GameConfig,
-  GameState,
-  Team,
-  AgentConfig,
-  BoardMessage,
-  MoveRecord,
-  DeliberationState,
-  ServerEvent,
-  AgentProfile,
-  SELF_DEFINITION_LIMIT,
-  STRATEGY_LIMIT,
-  NOTEPAD_LIMIT,
-  AGENT_NOTE_LIMIT,
-  MAX_NOTEPADS_VISIBLE,
+  GameConfig, GameState, Team, AgentConfig, BoardMessage,
+  MoveRecord, DeliberationState, ServerEvent, AgentProfile,
+  MEMORY_LIMIT,
 } from "../shared/types.js";
 import {
-  createGame,
-  validateMove,
-  applyMove,
-  getGameStatus,
-  getLegalMoves,
-  boardToAscii,
+  createGame, validateMove, applyMove, getGameStatus, getLegalMoves, boardToAscii,
 } from "./game.js";
 import {
-  saveAgentProfile,
-  loadAgentProfile,
-  saveGameNotepad,
-  loadRecentNotepads,
-  saveGameRecord,
-  savePostgameMessage,
-  saveAgentNote,
-  loadAgentNotesForGame,
-  snapshotAgentProfile,
+  saveAgentProfile, loadAgentProfile, saveGameRecord,
+  savePostgameMessage, snapshotMemory,
 } from "./persistence.js";
 import { getPersonality } from "./personalities.js";
 import { analyzeGame, formatAnalysisSummary, getSpectatorEval } from "./engine.js";
 
-// ── Model mapping ────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 
 const MODEL_MAP: Record<string, string> = {
-  opus: "claude-opus-4-6",
-  sonnet: "claude-sonnet-4-6",
-  haiku: "claude-haiku-4-5",
+  opus: "claude-opus-4-6", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5",
 };
-
-function resolveModel(model: string): string {
-  return MODEL_MAP[model] ?? model;
-}
-
-function formatClock(ms: number): string {
-  const totalSec = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
+function resolveModel(m: string) { return MODEL_MAP[m] ?? m; }
+function formatClock(ms: number) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
 }
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
-function buildAgentSystemPrompt(
-  agent: AgentConfig,
-  teamAgents: AgentConfig[],
-  team: Team,
-  profile: AgentProfile | null,
-  recentNotepads: string[],
-  agentNotes: { subject: string; content: string }[]
+function buildSystemPrompt(
+  agent: AgentConfig, teamAgents: AgentConfig[], team: Team, memory: string
 ): string {
-  const teammates = teamAgents
-    .filter((a) => a.id !== agent.id)
-    .map((a) => a.name)
-    .join(", ");
-
+  const teammates = teamAgents.filter((a) => a.id !== agent.id).map((a) => a.name).join(", ");
   const isSolo = teamAgents.length === 1;
+  const personality = agent.personalityId ? getPersonality(agent.personalityId).systemPromptFragment : "";
 
-  let prompt = `You are ${agent.name}, on the ${team} team in a collaborative chess game.
+  let p = `You are ${agent.name}, playing ${team.toUpperCase()} in a chess game.
+${teammates ? `TEAMMATES: ${teammates}` : "Playing solo."}
 
-TEAM: ${teamAgents.map((a) => a.name).join(", ")}${teammates ? ` | TEAMMATES: ${teammates}` : ""} | YOU PLAY: ${team.toUpperCase()}
+${personality}
 
-Your memory persists across the entire game. Between games you reflect and learn.`;
+YOUR MEMORY (${memory.length}/${MEMORY_LIMIT} chars):
+${memory || "(empty — you haven't formed any memories yet)"}
 
-  // Self-definition (their evolving identity)
-  if (profile?.selfDefinition) {
-    prompt += `\n\nWHO YOU ARE:\n${profile.selfDefinition}`;
-  }
+HOW THIS WORKS:
+- You think carefully using extended thinking, then speak.
+- Everything you say out loud is shared with your team${isSolo ? "" : "mates"} on the message board.
+- Use your thinking to analyze deeply. Use your words to communicate clearly.
+- To make a move, call the submit_move tool.${isSolo ? "" : " Any teammate can submit."}
 
-  // Strategy doc
-  if (profile?.strategy) {
-    prompt += `\n\nYOUR STRATEGY:\n${profile.strategy}`;
-  }
+After each game, you'll reflect and can update your memory.
+Your memory persists across games — use it to track what you've learned about chess, your teammates, opponents, and strategies that work.`;
 
-  // Recent game notepads
-  if (recentNotepads.length > 0) {
-    prompt += `\n\nYOUR RECENT GAME NOTES (newest first):`;
-    for (let i = 0; i < recentNotepads.length; i++) {
-      prompt += `\n[Game -${i + 1}]: ${recentNotepads[i]}`;
-    }
-  }
-
-  // Notes on other agents in this game
-  if (agentNotes.length > 0) {
-    prompt += `\n\nYOUR NOTES ON OTHER PLAYERS:`;
-    for (const note of agentNotes) {
-      prompt += `\n[${note.subject}]: ${note.content}`;
-    }
-  }
-
-  if (isSolo) {
-    prompt += `\n\nYou are playing solo. Submit moves directly with submit_move.`;
-  } else {
-    prompt += `\n\nHOW IT WORKS:
-- Agents take turns speaking one at a time (randomly ordered).
-- You see the board, legal moves, clock, and teammate messages in your prompt.
-- Tools: post_message (share with team), submit_move (ends the turn).
-- You can post AND submit, or just post and let the next teammate decide.`;
-  }
-
-  prompt += `\n\nMESSAGES: Keep posted messages SHORT — 1-3 sentences. State your move and reason.`;
-
-  return prompt;
+  return p;
 }
 
-function buildAgentTurnPrompt(
-  fen: string,
-  legalMoves: string[],
-  turnNumber: number,
-  lastOpponentMove: MoveRecord | null,
-  messages: BoardMessage[],
-  clockRemaining: number,
-  isFirstEver: boolean,
-  isSolo: boolean
+function buildTurnPrompt(
+  fen: string, legalMoves: string[], turnNumber: number,
+  lastOpponentMove: MoveRecord | null, messages: BoardMessage[],
+  clockRemaining: number, isFirstEver: boolean, isSolo: boolean
 ): string {
   const ascii = boardToAscii(fen);
-  const clock = formatClock(clockRemaining);
+  const lastInfo = lastOpponentMove
+    ? `\nOpponent: ${lastOpponentMove.selectedAgentName} played ${lastOpponentMove.move}.` : "";
+  const msgSection = !isSolo && messages.length > 0
+    ? `\nTEAM CHAT:\n${messages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}` : "";
 
-  const lastMoveInfo = lastOpponentMove
-    ? `\nOpponent's last move: ${lastOpponentMove.selectedAgentName} played ${lastOpponentMove.move}.`
-    : "";
+  return `${isFirstEver ? "Game begins! " : `Turn ${turnNumber}. `}Your move.${lastInfo}
 
-  const messageSection = !isSolo && messages.length > 0
-    ? `\nTEAM CHAT THIS TURN:\n${messages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}`
-    : isSolo ? "" : "\n(No messages yet — you're first to speak.)";
-
-  const opening = isFirstEver ? "The game begins! " : `Turn ${turnNumber}. `;
-  const action = isSolo
-    ? "Submit your move."
-    : "Post your suggestion or submit a move (or both). Be brief.";
-
-  return `${opening}It's your team's move.${lastMoveInfo}
-
-BOARD:
 \`\`\`
 ${ascii}
 \`\`\`
 FEN: ${fen}
 LEGAL MOVES: ${legalMoves.join(", ")}
-TEAM CLOCK: ${clock} remaining
-${messageSection}
+CLOCK: ${formatClock(clockRemaining)}
+${msgSection}
 
-${action}`;
+Think carefully, then share your analysis. Call submit_move when ready.`;
 }
 
 function buildReflectionPrompt(
-  winner: Team | "draw" | null,
-  team: Team,
-  profile: AgentProfile,
-  engineAnalysis: string
+  winner: Team | "draw" | null, team: Team, memory: string, engineAnalysis: string
 ): string {
-  const outcome = winner === "draw"
-    ? "The game ended in a draw."
-    : winner === team
-      ? "Your team WON!"
-      : "Your team LOST.";
-
+  const outcome = winner === "draw" ? "Draw." : winner === team ? "You WON!" : "You LOST.";
   return `GAME OVER. ${outcome}
 
 ${engineAnalysis}
 
-Time to reflect on this game. You have several tools:
+YOUR MEMORY (${memory.length}/${MEMORY_LIMIT} chars):
+${memory || "(empty)"}
 
-1. **write_game_notepad** (required) — Write your reflection on THIS game (max ${NOTEPAD_LIMIT} chars). What happened? What did you learn?
+Reflect on this game. Everything you say will be shared with all players.
 
-2. **update_strategy** — Update your strategy doc (max ${STRATEGY_LIMIT} chars). Your current strategy:
-${profile.strategy || "(empty)"}
-
-3. **update_self_definition** — Update how you define yourself (max ${SELF_DEFINITION_LIMIT} chars). Only change this if your identity has genuinely evolved. Current:
-${profile.selfDefinition || "(empty)"}
-
-4. **post_reflection** — Share a message with ALL players (both teams) on the post-game board. Offer feedback, observations, or compliments to teammates and opponents.
-
-5. **update_agent_note** — Update your private note on another player (max ${AGENT_NOTE_LIMIT} chars). Record what you've learned about their style, strengths, and tendencies.
-
-Reflect honestly. Write your game notepad and post at least one message to the group.`;
+Then use update_memory to save what you've learned. Your memory carries across all future games — record observations about opponents, teammates, strategies that work, mistakes to avoid. If your memory is getting long, rewrite it more concisely, keeping only the most valuable insights.`;
 }
 
-function buildDiscussionPrompt(
-  postGameMessages: BoardMessage[]
-): string {
-  const chat = postGameMessages.length > 0
-    ? postGameMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")
-    : "(No messages)";
+function buildDiscussionPrompt(postGameMessages: BoardMessage[]): string {
+  const chat = postGameMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n");
+  return `Everyone has shared their reflections:
 
-  return `All players have shared their reflections. Here's what everyone said:
-
-POST-GAME DISCUSSION:
 ${chat}
 
-Read your teammates' and opponents' feedback. You may:
-- **post_reflection** to respond to others' observations
-- **update_strategy** if others' feedback changes your approach
-- **update_self_definition** if this discussion shifts how you see yourself
-
-This is your final chance to reflect before the next game begins.`;
+Respond to what others said. You can update_memory if their feedback changes your thinking. This is your words will be shared with all players.`;
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
@@ -224,105 +114,60 @@ export class GameOrchestrator {
   private state: GameState;
   private listeners: Set<EventCallback> = new Set();
   private tickInterval: ReturnType<typeof setInterval> | null = null;
-
-  // Agent profiles loaded at game start
   private profiles: Map<string, AgentProfile> = new Map();
-
-  // Persistent agent sessions within a game
   private agentSessions: Map<string, string> = new Map();
   private lastAgentId: Map<Team, string> = new Map();
   private resolveCompletion: (() => void) | null = null;
-
-  // Post-game shared board
   private postGameMessages: BoardMessage[] = [];
 
   constructor(config: GameConfig) {
     this.config = config;
-
     const fen = createGame();
     const clockMs = config.gameTimeSec * 1000;
     this.state = {
-      gameId: config.id,
-      gameNumber: config.gameNumber,
-      fen,
-      moveHistory: [],
-      currentTurn: "white",
-      phase: "waiting",
-      turnNumber: 1,
-      winner: null,
-      deliberation: null,
-      clockWhite: clockMs,
-      clockBlack: clockMs,
+      gameId: config.id, gameNumber: config.gameNumber, fen,
+      moveHistory: [], currentTurn: "white", phase: "waiting",
+      turnNumber: 1, winner: null, deliberation: null,
+      clockWhite: clockMs, clockBlack: clockMs,
     };
-
-    // Load profiles for all agents
-    for (const agent of [...config.white.agents, ...config.black.agents]) {
-      const profile = loadAgentProfile(agent.name);
-      if (profile) {
-        this.profiles.set(agent.name, profile);
-      }
+    for (const a of [...config.white.agents, ...config.black.agents]) {
+      const p = loadAgentProfile(a.name);
+      if (p) this.profiles.set(a.name, p);
     }
   }
 
-  // ── Event system ───────────────────────────────────────────────────
-
-  on(callback: EventCallback): () => void {
-    this.listeners.add(callback);
-    return () => this.listeners.delete(callback);
-  }
-
-  private emit(event: ServerEvent): void {
-    for (const listener of this.listeners) {
-      try { listener(event); } catch (e) { console.error("Event listener error:", e); }
-    }
-  }
-
-  // ── Public API ─────────────────────────────────────────────────────
-
+  on(cb: EventCallback) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
+  private emit(e: ServerEvent) { for (const l of this.listeners) { try { l(e); } catch {} } }
   getState(): GameState { return { ...this.state }; }
   getConfig(): GameConfig { return this.config; }
   getLog(): MoveRecord[] { return [...this.state.moveHistory]; }
+  getResult() { return { winner: this.state.winner, totalMoves: this.state.moveHistory.length }; }
 
-  getResult() {
-    return { winner: this.state.winner, totalMoves: this.state.moveHistory.length };
-  }
-
-  getProfile(agentName: string): AgentProfile | null {
-    return this.profiles.get(agentName) ?? loadAgentProfile(agentName);
+  getProfile(name: string): AgentProfile | null {
+    return this.profiles.get(name) ?? loadAgentProfile(name);
   }
 
   async runToCompletion(): Promise<void> {
-    if (this.state.phase !== "waiting") throw new Error("Game already started");
+    if (this.state.phase !== "waiting") throw new Error("Already started");
     return new Promise<void>((resolve) => {
       this.resolveCompletion = resolve;
       this.runGameLoop().catch((err) => { console.error("Game loop error:", err); resolve(); });
     });
   }
 
-  stop(): void {
-    if (this.tickInterval) { clearInterval(this.tickInterval); this.tickInterval = null; }
-  }
+  stop() { if (this.tickInterval) { clearInterval(this.tickInterval); this.tickInterval = null; } }
 
-  // ── Clock helpers ──────────────────────────────────────────────────
+  // ── Clock ──────────────────────────────────────────────────────────
 
-  private getTeamClock(team: Team): number {
-    return team === "white" ? this.state.clockWhite : this.state.clockBlack;
-  }
-
-  private isClockExpired(team: Team): boolean {
-    return this.getTeamClock(team) <= 0;
-  }
-
-  private startClockTicker(): void {
+  private getTeamClock(t: Team) { return t === "white" ? this.state.clockWhite : this.state.clockBlack; }
+  private isClockExpired(t: Team) { return this.getTeamClock(t) <= 0; }
+  private startClockTicker() {
     if (this.tickInterval) clearInterval(this.tickInterval);
     this.tickInterval = setInterval(() => {
       this.emit({ type: "clock:tick", payload: { clockWhite: this.state.clockWhite, clockBlack: this.state.clockBlack } });
     }, 1000);
   }
-
-  private stopClockTicker(): void {
-    if (this.tickInterval) { clearInterval(this.tickInterval); this.tickInterval = null; }
-  }
+  private stopClockTicker() { if (this.tickInterval) { clearInterval(this.tickInterval); this.tickInterval = null; } }
 
   private pickAgent(agents: AgentConfig[], team: Team): AgentConfig {
     const lastId = this.lastAgentId.get(team);
@@ -332,62 +177,64 @@ export class GameOrchestrator {
     return picked;
   }
 
-  // ── Thinking stream helpers ────────────────────────────────────────
+  // ── Thinking stream ────────────────────────────────────────────────
 
-  private emitThinking(agentId: string, agentName: string, content: string): void {
+  private emitThinking(agentId: string, agentName: string, content: string) {
     this.emit({ type: "agent:thinking", payload: { agentId, agentName, content } });
   }
 
-  private streamSdkMessage(msg: any, agent: AgentConfig, logPrefix: string): void {
+  /**
+   * Process an SDK message. Captures thinking, text, and tool use.
+   * Returns any text content from the assistant (to auto-post as message).
+   */
+  private streamSdkMessage(msg: any, agent: AgentConfig, logPrefix: string): string | null {
+    let textContent: string | null = null;
+
     if (msg.type === "system" && msg.subtype === "init") {
-      const sessionId = msg.session_id;
-      if (sessionId) {
-        this.agentSessions.set(agent.id, sessionId);
-        console.log(`[${logPrefix}] ${agent.name} session: ${sessionId}`);
-      }
+      const sid = msg.session_id;
+      if (sid) { this.agentSessions.set(agent.id, sid); console.log(`[${logPrefix}] ${agent.name} session: ${sid}`); }
     }
 
-    // Log all message types for debugging
     if (msg.type !== "system") {
       console.log(`[${logPrefix}] ${agent.name} msg: type=${msg.type} subtype=${msg.subtype ?? "-"}`);
     }
 
-    // Assistant messages — text and tool calls
     if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
-        if (block.type === "tool_use") {
-          const inputStr = JSON.stringify(block.input ?? {});
-          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${inputStr.slice(0, 200)})`);
-          this.emitThinking(agent.id, agent.name, `\n── ${block.name} ──\n${inputStr}\n`);
+        if (block.type === "thinking" && block.thinking) {
+          console.log(`[${logPrefix}] ${agent.name} thinking(${block.thinking.length} chars)`);
+          this.emitThinking(agent.id, agent.name, `💭 ${block.thinking}\n\n`);
+        } else if (block.type === "tool_use") {
+          const input = JSON.stringify(block.input ?? {});
+          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${input.slice(0, 200)})`);
+          this.emitThinking(agent.id, agent.name, `── ${block.name} ──\n${input}\n`);
         } else if (block.type === "text" && block.text) {
-          console.log(`[${logPrefix}] ${agent.name} → text(${block.text.length} chars): ${block.text.slice(0, 150)}`);
-          this.emitThinking(agent.id, agent.name, block.text + "\n");
-        } else if (block.type === "thinking" && block.thinking) {
-          console.log(`[${logPrefix}] ${agent.name} → thinking(${block.thinking.length} chars)`);
-          this.emitThinking(agent.id, agent.name, `\n💭 ${block.thinking}\n`);
+          console.log(`[${logPrefix}] ${agent.name} says: ${block.text.slice(0, 150)}`);
+          this.emitThinking(agent.id, agent.name, `📢 ${block.text}\n\n`);
+          textContent = block.text;
         }
       }
-    }
-
-    // Result messages — log for diagnostics
-    if (msg.type === "result") {
-      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype} len=${msg.result?.length ?? 0}`);
     }
 
     if (msg.type === "user" && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
         if (block.type === "tool_result") {
-          const resultStr = typeof block.content === "string" ? block.content
-            : Array.isArray(block.content) ? block.content.map((c: any) => c.text ?? "").join("") : JSON.stringify(block.content ?? "");
-          console.log(`[${logPrefix}] ${agent.name} ← ${resultStr.slice(0, 200)}`);
-          this.emitThinking(agent.id, agent.name, `← ${resultStr}\n`);
+          const r = typeof block.content === "string" ? block.content
+            : Array.isArray(block.content) ? block.content.map((c: any) => c.text ?? "").join("") : "";
+          this.emitThinking(agent.id, agent.name, `← ${r}\n`);
         }
       }
+    }
+
+    if (msg.type === "result") {
+      console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype}`);
     }
 
     if (msg.type === "error" || msg.subtype === "error") {
       console.error(`[${logPrefix}] ${agent.name} ERROR:`, JSON.stringify(msg).slice(0, 500));
     }
+
+    return textContent;
   }
 
   // ── Game loop ──────────────────────────────────────────────────────
@@ -395,44 +242,32 @@ export class GameOrchestrator {
   private async runGameLoop(): Promise<void> {
     while (true) {
       const status = getGameStatus(this.state.fen);
-
       if (status === "checkmate") {
         const winner: Team = this.state.currentTurn === "white" ? "black" : "white";
         this.state.phase = "complete"; this.state.winner = winner;
-        console.log(`[game] Checkmate — ${winner} wins`);
         this.emit({ type: "game:complete", payload: { winner } });
-        this.emit({ type: "game:state", payload: this.getState() });
-        break;
+        this.emit({ type: "game:state", payload: this.getState() }); break;
       }
       if (status === "stalemate" || status === "draw") {
         this.state.phase = "complete"; this.state.winner = "draw";
-        console.log("[game] Draw");
         this.emit({ type: "game:complete", payload: { winner: "draw" } });
-        this.emit({ type: "game:state", payload: this.getState() });
-        break;
+        this.emit({ type: "game:state", payload: this.getState() }); break;
       }
       if (this.isClockExpired(this.state.currentTurn)) {
         const winner: Team = this.state.currentTurn === "white" ? "black" : "white";
         this.state.phase = "complete"; this.state.winner = winner;
-        console.log(`[game] Time — ${winner} wins`);
         this.emit({ type: "game:complete", payload: { winner } });
-        this.emit({ type: "game:state", payload: this.getState() });
-        break;
+        this.emit({ type: "game:state", payload: this.getState() }); break;
       }
-
       await this.runTurn();
     }
 
-    // Save game to database
-    const whiteNames = this.config.white.agents.map((a) => a.name);
-    const blackNames = this.config.black.agents.map((a) => a.name);
-    saveGameRecord(
-      this.config.gameNumber, this.config.id,
-      whiteNames, blackNames,
+    const wa = this.config.white.agents.map((a) => a.name);
+    const ba = this.config.black.agents.map((a) => a.name);
+    saveGameRecord(this.config.gameNumber, this.config.id, wa, ba,
       this.state.winner, this.state.moveHistory.length,
       Date.now() - (this.state.moveHistory[0]?.timestamp ?? Date.now()),
-      this.getLog(), this.config.createdAt
-    );
+      this.getLog(), this.config.createdAt);
 
     await this.runPostGame();
     this.resolveCompletion?.();
@@ -450,9 +285,7 @@ export class GameOrchestrator {
       team, startedAt: Date.now(), messages: [],
       activeAgentId: null, selectedAgentId: null, submittedMove: null,
     };
-
-    this.state.phase = "deliberation";
-    this.state.deliberation = deliberation;
+    this.state.phase = "deliberation"; this.state.deliberation = deliberation;
     this.emit({ type: "game:phase", payload: { phase: "deliberation", team } });
     this.emit({ type: "game:state", payload: this.getState() });
     this.startClockTicker();
@@ -464,10 +297,9 @@ export class GameOrchestrator {
     let movingAgent: AgentConfig | null = null;
 
     while (!moveSubmitted) {
-      const currentClock = turnStartClock - (Date.now() - turnStartTime);
-      if (team === "white") this.state.clockWhite = Math.max(0, currentClock);
-      else this.state.clockBlack = Math.max(0, currentClock);
-
+      const elapsed = Date.now() - turnStartTime;
+      if (team === "white") this.state.clockWhite = Math.max(0, turnStartClock - elapsed);
+      else this.state.clockBlack = Math.max(0, turnStartClock - elapsed);
       if (this.getTeamClock(team) <= 0) break;
 
       const agent = isSolo ? agents[0] : this.pickAgent(agents, team);
@@ -491,7 +323,6 @@ export class GameOrchestrator {
     if (!moveSubmitted) {
       moveSubmitted = legalMoves[Math.floor(Math.random() * legalMoves.length)];
       movingAgent = agents[0];
-      deliberation.selectedAgentId = movingAgent.id; deliberation.submittedMove = moveSubmitted;
     }
 
     const newFen = applyMove(this.state.fen, moveSubmitted);
@@ -500,57 +331,38 @@ export class GameOrchestrator {
       timestamp: Date.now(), selectedAgentId: movingAgent!.id, selectedAgentName: movingAgent!.name,
       deliberation: { messages: [...deliberation.messages], durationMs: Date.now() - deliberation.startedAt },
     };
-
-    this.state.fen = newFen;
-    this.state.moveHistory.push(moveRecord);
+    this.state.fen = newFen; this.state.moveHistory.push(moveRecord);
     this.state.currentTurn = team === "white" ? "black" : "white";
-    this.state.turnNumber++;
-    this.state.deliberation = null;
+    this.state.turnNumber++; this.state.deliberation = null;
 
     console.log(`[${team}] ${movingAgent!.name} played ${moveSubmitted} — W:${formatClock(this.state.clockWhite)} B:${formatClock(this.state.clockBlack)}`);
     this.emit({ type: "move:submitted", payload: moveRecord });
     this.emit({ type: "game:state", payload: this.getState() });
-
     getSpectatorEval(newFen).then((ev) => this.emit({ type: "eval:update", payload: ev })).catch(() => {});
   }
 
-  // ── MCP server for game turns ──────────────────────────────────────
+  // ── MCP: game turn (only submit_move) ──────────────────────────────
 
   private createGameServer(
-    agent: AgentConfig, team: Team, deliberation: DeliberationState,
-    legalMoves: string[], onMove: (m: string) => void, isSolo: boolean
+    legalMoves: string[], onMove: (m: string) => void
   ) {
-    const orchestrator = this;
     const fen = this.state.fen;
-    const tools = [];
-
-    if (!isSolo) {
-      tools.push(tool("post_message", "Post a message to your team's board.",
-        { message: z.string().describe("1-3 sentences") },
-        async (args: { message: string }) => {
-          const msg: BoardMessage = {
-            id: uuidv4(), agentId: agent.id, agentName: agent.name,
-            content: args.message, timestamp: Date.now(), turnNumber: orchestrator.state.turnNumber,
-          };
-          deliberation.messages.push(msg);
-          orchestrator.emit({ type: "deliberation:message", payload: msg });
-          return { content: [{ type: "text" as const, text: "Posted." }] };
-        }
-      ));
-    }
-
-    tools.push(tool("submit_move", "Submit the team's chess move (SAN notation).",
-      { move: z.string().describe("e.g. e4, Nf3, O-O") },
-      async (args: { move: string }) => {
-        if (validateMove(fen, args.move)) { onMove(args.move); return { content: [{ type: "text" as const, text: `${args.move} submitted!` }] }; }
-        return { content: [{ type: "text" as const, text: `Illegal: ${args.move}. Legal: ${legalMoves.join(", ")}` }] };
-      }
-    ));
-
-    return createSdkMcpServer({ name: `chess-${team}-${agent.name.toLowerCase()}`, tools });
+    return createSdkMcpServer({
+      name: "chess",
+      tools: [
+        tool("submit_move", "Submit the team's chess move (SAN notation).",
+          { move: z.string().describe("e.g. e4, Nf3, O-O") },
+          async (args: { move: string }) => {
+            if (validateMove(fen, args.move)) { onMove(args.move); return { content: [{ type: "text" as const, text: `${args.move} submitted!` }] }; }
+            return { content: [{ type: "text" as const, text: `Illegal: ${args.move}. Legal: ${legalMoves.join(", ")}` }] };
+          }
+        ),
+      ],
+    });
   }
 
   // ── Agent game turn ────────────────────────────────────────────────
+  // Text output = auto-posted to team message board
 
   private async runAgentTurn(
     agent: AgentConfig, teamAgents: AgentConfig[], team: Team,
@@ -560,32 +372,27 @@ export class GameOrchestrator {
     const isFirstEver = !existingSessionId;
 
     let submittedMove: string | null = null;
-    const server = this.createGameServer(agent, team, deliberation, legalMoves, (m) => { submittedMove = m; }, isSolo);
+    const server = this.createGameServer(legalMoves, (m) => { submittedMove = m; });
 
-    const lastOpponentMove = this.state.moveHistory.length > 0 ? this.state.moveHistory[this.state.moveHistory.length - 1] : null;
-    const prompt = buildAgentTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastOpponentMove, deliberation.messages, this.getTeamClock(team), isFirstEver && this.state.turnNumber === 1, isSolo);
+    const lastMove = this.state.moveHistory.length > 0 ? this.state.moveHistory[this.state.moveHistory.length - 1] : null;
+    const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastMove,
+      deliberation.messages, this.getTeamClock(team), isFirstEver && this.state.turnNumber === 1, isSolo);
 
-    const allowedTools = isSolo ? ["mcp__chess__submit_move"] : ["mcp__chess__post_message", "mcp__chess__submit_move"];
-
-    const profile = this.profiles.get(agent.name) ?? null;
-    const recentNotepads = loadRecentNotepads(agent.name, MAX_NOTEPADS_VISIBLE).map((n) => n.content);
-
-    // Load notes on all other agents in this game
-    const allGameAgents = [...this.config.white.agents, ...this.config.black.agents];
-    const otherNames = allGameAgents.filter((a) => a.name !== agent.name).map((a) => a.name);
-    const agentNotes = loadAgentNotesForGame(agent.name, otherNames);
-
+    const memory = this.profiles.get(agent.name)?.memory ?? "";
     const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
 
     const options = isFirstEver
       ? {
           model: resolveModel(agent.model),
-          systemPrompt: buildAgentSystemPrompt(agent, teamAgents, team, profile, recentNotepads, agentNotes),
-          mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const,
-          thinking: thinkingConfig,
+          systemPrompt: buildSystemPrompt(agent, teamAgents, team, memory),
+          mcpServers: { chess: server }, maxTurns: 3,
+          allowedTools: ["mcp__chess__submit_move"],
+          permissionMode: "dontAsk" as const, thinking: thinkingConfig,
         }
-      : { resume: existingSessionId, mcpServers: { chess: server }, maxTurns: 3, allowedTools, permissionMode: "dontAsk" as const,
-          thinking: thinkingConfig,
+      : {
+          resume: existingSessionId, mcpServers: { chess: server }, maxTurns: 3,
+          allowedTools: ["mcp__chess__submit_move"],
+          permissionMode: "dontAsk" as const, thinking: thinkingConfig,
         };
 
     const agentDeadline = Date.now() + this.config.agentTurnTimeSec * 1000;
@@ -593,13 +400,24 @@ export class GameOrchestrator {
     if (isFirstEver) {
       this.emitThinking(agent.id, agent.name, `══ SYSTEM PROMPT ══\n${(options as any).systemPrompt}\n\n`);
     }
-    this.emitThinking(agent.id, agent.name, `══ TURN ${this.state.turnNumber} ══\n${prompt}\n\n── RESPONSE ──\n`);
+    this.emitThinking(agent.id, agent.name, `══ TURN ${this.state.turnNumber} ══\n${prompt}\n\n`);
 
     try {
       for await (const message of query({ prompt, options })) {
         if (submittedMove) break;
         if (Date.now() > agentDeadline || this.isClockExpired(team)) break;
-        this.streamSdkMessage(message, agent, team);
+
+        const textContent = this.streamSdkMessage(message, agent, team);
+
+        // Auto-post text to team message board
+        if (textContent && !isSolo) {
+          const msg: BoardMessage = {
+            id: uuidv4(), agentId: agent.id, agentName: agent.name,
+            content: textContent, timestamp: Date.now(), turnNumber: this.state.turnNumber,
+          };
+          deliberation.messages.push(msg);
+          this.emit({ type: "deliberation:message", payload: msg });
+        }
       }
     } catch (err: any) { console.error(`[${team}] ${agent.name} error:`, err?.message ?? err); }
 
@@ -609,12 +427,10 @@ export class GameOrchestrator {
   // ── Post-game ──────────────────────────────────────────────────────
 
   private async runPostGame(): Promise<void> {
-    console.log("[postgame] Starting post-game reflection...");
+    console.log("[postgame] Starting reflection...");
 
-    // Run engine analysis
     let whiteAnalysis = "", blackAnalysis = "";
     try {
-      console.log("[postgame] Running Stockfish analysis...");
       const analysis = await analyzeGame(this.state.moveHistory);
       whiteAnalysis = formatAnalysisSummary(analysis, "white");
       blackAnalysis = formatAnalysisSummary(analysis, "black");
@@ -622,7 +438,7 @@ export class GameOrchestrator {
 
     const allAgents = [...this.config.white.agents, ...this.config.black.agents];
 
-    // ── Phase 1: Private reflection + post to board ──────────────
+    // ── Phase 1: Private reflection, text auto-shared ────────────
     this.state.phase = "post_game_reflection";
     this.emit({ type: "game:phase", payload: { phase: "post_game_reflection" } });
     this.postGameMessages = [];
@@ -632,31 +448,40 @@ export class GameOrchestrator {
       if (!sessionId) continue;
 
       const profile = this.profiles.get(agent.name) ?? {
-        name: agent.name, personalityId: agent.personalityId ?? "",
-        selfDefinition: "", strategy: "", updatedAt: new Date().toISOString(),
+        name: agent.name, personalityId: agent.personalityId ?? "", memory: "", updatedAt: "",
       };
-      const teamAnalysis = agent.team === "white" ? whiteAnalysis : blackAnalysis;
-      const prompt = buildReflectionPrompt(this.state.winner, agent.team, profile, teamAnalysis);
+      const analysis = agent.team === "white" ? whiteAnalysis : blackAnalysis;
+      const prompt = buildReflectionPrompt(this.state.winner, agent.team, profile.memory, analysis);
 
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
-      this.emitThinking(agent.id, agent.name, `\n══ POST-GAME REFLECTION ══\n${prompt}\n\n── RESPONSE ──\n`);
+      this.emitThinking(agent.id, agent.name, `\n══ REFLECTION ══\n${prompt}\n\n`);
 
       const server = this.createReflectionServer(agent);
-      const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 3,
-        allowedTools: ["mcp__chess__write_game_notepad", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__post_reflection", "mcp__chess__update_agent_note"],
+      const options = {
+        resume: sessionId, mcpServers: { chess: server }, maxTurns: 3,
+        allowedTools: ["mcp__chess__update_memory"],
         permissionMode: "dontAsk" as const,
-        thinking: { type: "enabled" as const, budgetTokens: 5000 } };
+        thinking: { type: "enabled" as const, budgetTokens: 5000 },
+      };
 
       try {
         for await (const message of query({ prompt, options })) {
-          this.streamSdkMessage(message, agent, "postgame");
+          const textContent = this.streamSdkMessage(message, agent, "postgame");
+          // Auto-post text to shared postgame board
+          if (textContent) {
+            const msg: BoardMessage = {
+              id: uuidv4(), agentId: agent.id, agentName: agent.name,
+              content: textContent, timestamp: Date.now(), turnNumber: 0,
+            };
+            this.postGameMessages.push(msg);
+            this.emit({ type: "postgame:message", payload: msg });
+            savePostgameMessage(msg.id, this.config.gameNumber, agent.name, textContent, msg.timestamp);
+          }
         }
       } catch (err: any) { console.error(`[postgame] ${agent.name} error:`, err?.message ?? err); }
-
-      console.log(`[postgame] ${agent.name} done reflecting.`);
     }
 
-    // ── Phase 2: Read everyone's reflections + respond ───────────
+    // ── Phase 2: Discussion — read everyone's reflections ────────
     this.state.phase = "post_game_discussion";
     this.emit({ type: "game:phase", payload: { phase: "post_game_discussion" } });
 
@@ -667,114 +492,62 @@ export class GameOrchestrator {
       if (!sessionId) continue;
 
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
-      this.emitThinking(agent.id, agent.name, `\n══ POST-GAME DISCUSSION ══\n${discussionPrompt}\n\n── RESPONSE ──\n`);
+      this.emitThinking(agent.id, agent.name, `\n══ DISCUSSION ══\n${discussionPrompt}\n\n`);
 
       const server = this.createReflectionServer(agent);
-      const options = { resume: sessionId, mcpServers: { chess: server }, maxTurns: 2,
-        allowedTools: ["mcp__chess__post_reflection", "mcp__chess__update_strategy", "mcp__chess__update_self_definition", "mcp__chess__update_agent_note"],
+      const options = {
+        resume: sessionId, mcpServers: { chess: server }, maxTurns: 2,
+        allowedTools: ["mcp__chess__update_memory"],
         permissionMode: "dontAsk" as const,
-        thinking: { type: "enabled" as const, budgetTokens: 3000 } };
+        thinking: { type: "enabled" as const, budgetTokens: 3000 },
+      };
 
       try {
         for await (const message of query({ prompt: discussionPrompt, options })) {
-          this.streamSdkMessage(message, agent, "discussion");
+          const textContent = this.streamSdkMessage(message, agent, "discussion");
+          if (textContent) {
+            const msg: BoardMessage = {
+              id: uuidv4(), agentId: agent.id, agentName: agent.name,
+              content: textContent, timestamp: Date.now(), turnNumber: 0,
+            };
+            this.postGameMessages.push(msg);
+            this.emit({ type: "postgame:message", payload: msg });
+            savePostgameMessage(msg.id, this.config.gameNumber, agent.name, textContent, msg.timestamp);
+          }
         }
       } catch (err: any) { console.error(`[discussion] ${agent.name} error:`, err?.message ?? err); }
     }
 
-    // Snapshot all agent profiles for evolution tracking
-    const allAgentsForSnapshot = [...this.config.white.agents, ...this.config.black.agents];
-    for (const agent of allAgentsForSnapshot) {
-      snapshotAgentProfile(agent.name, this.config.gameNumber);
+    // Snapshot all memories
+    for (const agent of allAgents) {
+      snapshotMemory(agent.name, this.config.gameNumber);
     }
 
-    console.log("[postgame] Post-game complete.");
+    console.log("[postgame] Complete.");
   }
 
   private createReflectionServer(agent: AgentConfig) {
     const orchestrator = this;
-    const gameNumber = this.config.gameNumber;
-
-    const writeNotepad = tool("write_game_notepad", `Write your reflection on this game (max ${NOTEPAD_LIMIT} chars).`,
-      { content: z.string().describe("Your reflection on this game") },
-      async (args: { content: string }) => {
-        const trimmed = args.content.slice(0, NOTEPAD_LIMIT);
-        saveGameNotepad(agent.name, { gameNumber, content: trimmed, createdAt: new Date().toISOString() });
-        console.log(`[postgame] ${agent.name} wrote notepad (${trimmed.length} chars)`);
-        return { content: [{ type: "text" as const, text: "Game notepad saved." }] };
-      }
-    );
-
-    const updateStrategy = tool("update_strategy", `Update your strategy doc (max ${STRATEGY_LIMIT} chars).`,
-      { content: z.string().describe("Your evolving chess strategy") },
-      async (args: { content: string }) => {
-        const trimmed = args.content.slice(0, STRATEGY_LIMIT);
-        const profile = orchestrator.profiles.get(agent.name) ?? {
-          name: agent.name, personalityId: agent.personalityId ?? "", selfDefinition: "", strategy: "", updatedAt: "",
-        };
-        profile.strategy = trimmed; profile.updatedAt = new Date().toISOString();
-        orchestrator.profiles.set(agent.name, profile);
-        saveAgentProfile(profile);
-        orchestrator.emit({ type: "agent:profile", payload: profile });
-        console.log(`[postgame] ${agent.name} updated strategy (${trimmed.length} chars)`);
-        return { content: [{ type: "text" as const, text: "Strategy updated." }] };
-      }
-    );
-
-    const updateSelf = tool("update_self_definition", `Update your self-definition (max ${SELF_DEFINITION_LIMIT} chars). Only if your identity has genuinely evolved.`,
-      { content: z.string().describe("Who you are as a chess player") },
-      async (args: { content: string }) => {
-        const trimmed = args.content.slice(0, SELF_DEFINITION_LIMIT);
-        const profile = orchestrator.profiles.get(agent.name) ?? {
-          name: agent.name, personalityId: agent.personalityId ?? "", selfDefinition: "", strategy: "", updatedAt: "",
-        };
-        profile.selfDefinition = trimmed; profile.updatedAt = new Date().toISOString();
-        orchestrator.profiles.set(agent.name, profile);
-        saveAgentProfile(profile);
-        orchestrator.emit({ type: "agent:profile", payload: profile });
-        console.log(`[postgame] ${agent.name} updated self-definition (${trimmed.length} chars)`);
-        return { content: [{ type: "text" as const, text: "Self-definition updated." }] };
-      }
-    );
-
-    const postReflection = tool("post_reflection", "Share a reflection with all players (both teams).",
-      { message: z.string().describe("Your reflection or feedback for the group") },
-      async (args: { message: string }) => {
-        const msg: BoardMessage = {
-          id: uuidv4(), agentId: agent.id, agentName: agent.name,
-          content: args.message, timestamp: Date.now(), turnNumber: 0,
-        };
-        orchestrator.postGameMessages.push(msg);
-        orchestrator.emit({ type: "postgame:message", payload: msg });
-        savePostgameMessage(msg.id, orchestrator.config.gameNumber, agent.name, args.message, msg.timestamp);
-        console.log(`[postgame] ${agent.name} posted: ${args.message.slice(0, 100)}`);
-        return { content: [{ type: "text" as const, text: "Posted to post-game board." }] };
-      }
-    );
-
-    const allGameAgents = [...orchestrator.config.white.agents, ...orchestrator.config.black.agents];
-    const otherNames = allGameAgents.filter((a) => a.name !== agent.name).map((a) => a.name);
-
-    const updateAgentNote = tool("update_agent_note",
-      `Update your private note on another player (max ${AGENT_NOTE_LIMIT} chars). Players: ${otherNames.join(", ")}`,
-      {
-        agentName: z.string().describe("Name of the player to write about"),
-        content: z.string().describe("Your observations about this player's style and tendencies"),
-      },
-      async (args: { agentName: string; content: string }) => {
-        if (!otherNames.includes(args.agentName)) {
-          return { content: [{ type: "text" as const, text: `Unknown player: ${args.agentName}. Choose from: ${otherNames.join(", ")}` }] };
-        }
-        const trimmed = args.content.slice(0, AGENT_NOTE_LIMIT);
-        saveAgentNote(agent.name, args.agentName, trimmed);
-        console.log(`[postgame] ${agent.name} noted on ${args.agentName}: ${trimmed.slice(0, 80)}`);
-        return { content: [{ type: "text" as const, text: `Note on ${args.agentName} saved.` }] };
-      }
-    );
-
     return createSdkMcpServer({
-      name: `chess-reflect-${agent.name.toLowerCase()}`,
-      tools: [writeNotepad, updateStrategy, updateSelf, postReflection, updateAgentNote],
+      name: "chess",
+      tools: [
+        tool("update_memory",
+          `Rewrite your memory (max ${MEMORY_LIMIT} chars). This replaces your entire memory and carries across all future games.`,
+          { content: z.string().describe("Your updated memory — insights, strategies, notes on players") },
+          async (args: { content: string }) => {
+            const trimmed = args.content.slice(0, MEMORY_LIMIT);
+            const profile = orchestrator.profiles.get(agent.name) ?? {
+              name: agent.name, personalityId: agent.personalityId ?? "", memory: "", updatedAt: "",
+            };
+            profile.memory = trimmed; profile.updatedAt = new Date().toISOString();
+            orchestrator.profiles.set(agent.name, profile);
+            saveAgentProfile(profile);
+            orchestrator.emit({ type: "agent:profile", payload: profile });
+            console.log(`[postgame] ${agent.name} updated memory (${trimmed.length}/${MEMORY_LIMIT} chars)`);
+            return { content: [{ type: "text" as const, text: `Memory updated (${trimmed.length}/${MEMORY_LIMIT} chars).` }] };
+          }
+        ),
+      ],
     });
   }
 }

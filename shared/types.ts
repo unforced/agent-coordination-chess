@@ -34,22 +34,11 @@ export interface TeamConfig {
 export interface AgentProfile {
   name: string;
   personalityId: string;
-  selfDefinition: string;   // short, ~200 chars, rarely updated
-  strategy: string;         // ~1000 chars, updated regularly
+  memory: string;     // unified memory, max 2000 chars
   updatedAt: string;
 }
 
-export interface GameNotepad {
-  gameNumber: number;
-  content: string;          // 500 chars per game reflection
-  createdAt: string;
-}
-
-export const SELF_DEFINITION_LIMIT = 200;
-export const STRATEGY_LIMIT = 1000;
-export const NOTEPAD_LIMIT = 500;
-export const AGENT_NOTE_LIMIT = 200;
-export const MAX_NOTEPADS_VISIBLE = 10;
+export const MEMORY_LIMIT = 2000;
 
 // ── Game ─────────────────────────────────────────────────────────────
 
@@ -66,8 +55,8 @@ export interface GameConfig {
 export type GamePhase =
   | "waiting"
   | "deliberation"
-  | "post_game_reflection"  // phase 1: private reflection + post to board
-  | "post_game_discussion"  // phase 2: read board + final reflection
+  | "post_game_reflection"
+  | "post_game_discussion"
   | "complete";
 
 export interface GameState {
@@ -120,7 +109,7 @@ export interface MoveRecord {
   };
 }
 
-// ── Arena State (continuous play) ───────────────────────────────────
+// ── Arena State ─────────────────────────────────────────────────────
 
 export interface ArenaState {
   totalGamesPlayed: number;

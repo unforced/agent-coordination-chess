@@ -42,8 +42,7 @@ function ensureProfiles(): void {
       saveAgentProfile({
         name: p.name,
         personalityId: pid,
-        selfDefinition: p.systemPromptFragment.slice(0, 200),
-        strategy: "",
+        memory: "",
         updatedAt: new Date().toISOString(),
       });
       console.log(`[arena] Created profile for ${p.name}`);
