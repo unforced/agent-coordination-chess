@@ -98,7 +98,7 @@ LEGAL MOVES: ${legalMoves.join(", ")}
 CLOCK: ${formatClock(clockRemaining)}
 ${gameLog}${msgSection}
 
-Respond to your teammates if they've spoken. Share your analysis briefly — what move do you recommend and why? If you're ready to commit, call submit_move. Your text is shared with your team.`;
+Your words are shared with your team. Respond to teammates, share your analysis, or suggest a move. If you feel confident, call submit_move — otherwise, contribute your thinking and let the discussion continue.`;
 }
 
 function buildReflectionPrompt(
