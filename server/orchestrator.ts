@@ -449,6 +449,11 @@ export class GameOrchestrator {
       }
     } catch (err: any) { console.error(`[${team}] ${agent.name} error:`, err?.message ?? err); }
 
+    // If agent produced nothing, note it in their thinking stream
+    if (streamState.currentText.length === 0 && streamState.seenThinking.size === 0 && streamState.seenTools.size === 0) {
+      this.emitThinking(agent.id, agent.name, `⚠ (session resumed but produced no response)\n\n`);
+    }
+
     // Auto-post the agent's final text to team message board
     if (lastTextContent && !isSolo) {
       const msg: BoardMessage = {
