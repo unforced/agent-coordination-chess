@@ -296,12 +296,8 @@ export class GameOrchestrator {
     let moveSubmitted: string | null = null;
     let movingAgent: AgentConfig | null = null;
 
-    // Each agent gets one chance to speak. After all have spoken,
-    // the last agent must submit or we force a random move.
-    const maxRounds = isSolo ? 1 : agents.length;
-    let round = 0;
-
-    while (!moveSubmitted && round < maxRounds) {
+    // Agents rotate freely until someone submits or the clock runs out
+    while (!moveSubmitted) {
       const elapsed = Date.now() - turnStartTime;
       if (team === "white") this.state.clockWhite = Math.max(0, turnStartClock - elapsed);
       else this.state.clockBlack = Math.max(0, turnStartClock - elapsed);
@@ -311,9 +307,8 @@ export class GameOrchestrator {
       deliberation.activeAgentId = agent.id;
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
 
-      const isLastSpeaker = round === maxRounds - 1;
       const result = await this.runAgentTurn(
-        agent, agents, team, deliberation, legalMoves, isSolo, isLastSpeaker
+        agent, agents, team, deliberation, legalMoves, isSolo
       );
 
       const nowElapsed = Date.now() - turnStartTime;
@@ -324,7 +319,6 @@ export class GameOrchestrator {
         moveSubmitted = result; movingAgent = agent;
         deliberation.selectedAgentId = agent.id; deliberation.submittedMove = result;
       }
-      round++;
     }
 
     this.stopClockTicker();
@@ -375,8 +369,7 @@ export class GameOrchestrator {
 
   private async runAgentTurn(
     agent: AgentConfig, teamAgents: AgentConfig[], team: Team,
-    deliberation: DeliberationState, legalMoves: string[], isSolo: boolean,
-    mustSubmit = false
+    deliberation: DeliberationState, legalMoves: string[], isSolo: boolean
   ): Promise<string | null> {
     const existingSessionId = this.agentSessions.get(agent.id);
     const isFirstEver = !existingSessionId;
@@ -385,12 +378,8 @@ export class GameOrchestrator {
     const server = this.createGameServer(legalMoves, (m) => { submittedMove = m; });
 
     const lastMove = this.state.moveHistory.length > 0 ? this.state.moveHistory[this.state.moveHistory.length - 1] : null;
-    let prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastMove,
+    const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber, lastMove,
       deliberation.messages, this.getTeamClock(team), isFirstEver && this.state.turnNumber === 1, isSolo);
-
-    if (mustSubmit) {
-      prompt += "\n\nYou are the LAST to speak this turn. You MUST call submit_move now.";
-    }
 
     const memory = this.profiles.get(agent.name)?.memory ?? "";
     const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
