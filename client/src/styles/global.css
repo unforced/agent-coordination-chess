@@ -1292,6 +1292,26 @@ body {
   color: var(--model-opus);
 }
 
+.game-feed__agent-selected {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.game-feed__agent-selected-name {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.game-feed__agent-selected-label {
+  font-style: italic;
+}
+
 .game-feed__phase-banner {
   text-align: center;
   font-family: var(--font-mono);

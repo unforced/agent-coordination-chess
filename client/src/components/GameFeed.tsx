@@ -6,12 +6,20 @@ import AgentBadge from "./AgentBadge";
 type FeedItem =
   | { kind: "message"; data: BoardMessage; team: Team }
   | { kind: "move"; data: MoveRecord }
-  | { kind: "postgame"; data: BoardMessage };
+  | { kind: "postgame"; data: BoardMessage }
+  | { kind: "agent_selected"; agentName: string; agentId: string };
+
+interface AgentSelection {
+  agentId: string;
+  agentName: string;
+  timestamp: number;
+}
 
 interface GameFeedProps {
   messages: { white: BoardMessage[]; black: BoardMessage[] };
   postGameMessages: BoardMessage[];
   moveHistory: MoveRecord[];
+  agentSelections: AgentSelection[];
   agents: AgentConfig[];
   activeAgentId: string | null;
   currentTurn: Team;
@@ -21,11 +29,18 @@ interface GameFeedProps {
 }
 
 export default function GameFeed({
-  messages, postGameMessages, moveHistory, agents,
+  messages, postGameMessages, moveHistory, agentSelections, agents,
   activeAgentId, currentTurn, turnNumber, phase, onAgentClick,
 }: GameFeedProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const agentMap = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
+
+  // Build a set of agent IDs that have messages, so we can mark silent selections
+  const agentIdsWithMessages = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of [...messages.white, ...messages.black]) ids.add(m.agentId);
+    return ids;
+  }, [messages]);
 
   const feed = useMemo(() => {
     const items: (FeedItem & { sortKey: number })[] = [];
@@ -43,9 +58,26 @@ export default function GameFeed({
       items.push({ kind: "postgame", data: msg, sortKey: msg.timestamp });
     }
 
+    // Add agent selections — but only show ones that don't have a corresponding message
+    // (if the agent spoke, their message already shows they were selected)
+    for (const sel of agentSelections) {
+      // Check if there's a message from this agent within ~20 seconds after selection
+      const hasMessage = [...messages.white, ...messages.black, ...postGameMessages].some(
+        (m) => m.agentId === sel.agentId && Math.abs(m.timestamp - sel.timestamp) < 20000
+      );
+      if (!hasMessage) {
+        items.push({
+          kind: "agent_selected",
+          agentName: sel.agentName,
+          agentId: sel.agentId,
+          sortKey: sel.timestamp,
+        });
+      }
+    }
+
     items.sort((a, b) => a.sortKey - b.sortKey);
     return items;
-  }, [messages, moveHistory, postGameMessages]);
+  }, [messages, moveHistory, postGameMessages, agentSelections]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -70,7 +102,7 @@ export default function GameFeed({
           <div className="game-feed__empty">Waiting for game to begin...</div>
         )}
 
-        {feed.map((item) => {
+        {feed.map((item, i) => {
           if (item.kind === "move") {
             const move = item.data;
             const teamColor = move.team === "white" ? "var(--white-team)" : "var(--black-team)";
@@ -86,6 +118,22 @@ export default function GameFeed({
                 >
                   by {move.selectedAgentName}
                 </span>
+              </div>
+            );
+          }
+
+          if (item.kind === "agent_selected") {
+            const agent = agentMap.get(item.agentId);
+            return (
+              <div key={`sel-${i}`} className="game-feed__agent-selected">
+                <span
+                  className="game-feed__agent-selected-name"
+                  style={{ cursor: "pointer" }}
+                  onClick={() => onAgentClick?.(item.agentName)}
+                >
+                  {item.agentName}
+                </span>
+                <span className="game-feed__agent-selected-label">thought but said nothing</span>
               </div>
             );
           }

@@ -34,6 +34,7 @@ export function useGameSocket() {
   const [connected, setConnected] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [activeAgentName, setActiveAgentName] = useState<string | null>(null);
+  const [agentSelections, setAgentSelections] = useState<{ agentId: string; agentName: string; timestamp: number }[]>([]);
   const [evalScore, setEvalScore] = useState<{ score: number; mate: number | null } | null>(null);
   const [agentProfiles, setAgentProfiles] = useState<Record<string, AgentProfile>>({});
 
@@ -63,6 +64,7 @@ export function useGameSocket() {
           setAgentStreams({});
           setPostGameMessages([]);
           setEvalScore(null);
+          setAgentSelections([]);
         }
         break;
       }
@@ -101,6 +103,11 @@ export function useGameSocket() {
       case "deliberation:active_agent": {
         setActiveAgentId(event.payload.agentId);
         setActiveAgentName(event.payload.agentName);
+        setAgentSelections((prev) => [...prev, {
+          agentId: event.payload.agentId,
+          agentName: event.payload.agentName,
+          timestamp: Date.now(),
+        }]);
         break;
       }
 
@@ -185,7 +192,7 @@ export function useGameSocket() {
 
   return {
     gameState, gameConfig, arenaState, messages, postGameMessages,
-    agentStreams, connected, activeAgentId, activeAgentName,
+    agentStreams, agentSelections, connected, activeAgentId, activeAgentName,
     evalScore, agentProfiles, requestProfile,
   };
 }

@@ -15,7 +15,7 @@ type Tab = "live" | "games" | "players";
 export default function App() {
   const {
     gameState, gameConfig, arenaState, messages, postGameMessages,
-    agentStreams, connected, activeAgentId, activeAgentName,
+    agentStreams, agentSelections, connected, activeAgentId, activeAgentName,
     evalScore, agentProfiles, requestProfile,
   } = useGameSocket();
 
@@ -105,6 +105,7 @@ export default function App() {
                 messages={messages}
                 postGameMessages={postGameMessages}
                 moveHistory={gameState?.moveHistory ?? []}
+                agentSelections={agentSelections}
                 agents={allAgents}
                 activeAgentId={activeAgentId}
                 currentTurn={gameState?.currentTurn ?? "white"}
