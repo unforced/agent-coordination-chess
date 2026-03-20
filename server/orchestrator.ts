@@ -54,7 +54,7 @@ function buildTurnPrompt(
   fen: string, legalMoves: string[], turnNumber: number,
   recentMoves: MoveRecord[], currentMessages: BoardMessage[],
   clockRemaining: number, isFirstEver: boolean, isSolo: boolean,
-  team: Team
+  team: Team, agentName: string
 ): string {
   const ascii = boardToAscii(fen);
 
@@ -78,7 +78,7 @@ function buildTurnPrompt(
   const msgSection = !isSolo && currentMessages.length > 0
     ? `\nTEAM CHAT THIS TURN:\n${currentMessages.map((m) => `[${m.agentName}]: ${m.content}`).join("\n")}` : "";
 
-  return `${isFirstEver ? "Game begins! " : `Turn ${turnNumber}. `}Your team's move.
+  return `${isFirstEver ? "Game begins! " : `Turn ${turnNumber}. `}You are ${agentName}. Your team's move.
 
 \`\`\`
 ${ascii}
@@ -398,7 +398,7 @@ export class GameOrchestrator {
 
     const prompt = buildTurnPrompt(this.state.fen, legalMoves, this.state.turnNumber,
       this.state.moveHistory, deliberation.messages, this.getTeamClock(team),
-      isFirstEver && this.state.turnNumber === 1, isSolo, team);
+      isFirstEver && this.state.turnNumber === 1, isSolo, team, agent.name);
 
     const memory = this.profiles.get(agent.name)?.memory ?? "";
     const thinkingConfig = { type: "enabled" as const, budgetTokens: 5000 };
