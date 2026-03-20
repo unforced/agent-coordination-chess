@@ -414,8 +414,10 @@ export class GameOrchestrator {
     }
     this.emitThinking(agent.id, agent.name, `══ TURN ${this.state.turnNumber} ══\n${prompt}\n\n`);
 
+    let messageCount = 0;
     try {
       for await (const message of query({ prompt, options })) {
+        messageCount++;
         if (submittedMove) break;
         if (Date.now() > agentDeadline || this.isClockExpired(team)) break;
 
@@ -432,6 +434,12 @@ export class GameOrchestrator {
         }
       }
     } catch (err: any) { console.error(`[${team}] ${agent.name} error:`, err?.message ?? err); }
+
+    if (messageCount === 0) {
+      console.warn(`[${team}] ${agent.name} produced NO messages (0 from query stream)`);
+    } else {
+      console.log(`[${team}] ${agent.name} produced ${messageCount} messages, submitted=${!!submittedMove}`);
+    }
 
     return submittedMove;
   }
