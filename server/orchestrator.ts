@@ -208,49 +208,63 @@ export class GameOrchestrator {
       console.log(`[${logPrefix}] ${agent.name} msg: type=${msg.type} subtype=${msg.subtype ?? "-"}`);
     }
 
+    // ── assistant message: thinking + text + tool_use blocks ──
     if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
         if (block.type === "thinking" && block.thinking) {
           console.log(`[${logPrefix}] ${agent.name} thinking(${block.thinking.length} chars)`);
-          this.emitThinking(agent.id, agent.name, `💭 ${block.thinking}\n\n`);
+          this.emitThinking(agent.id, agent.name,
+            `┌─ THINKING ─────────────────────────\n│ ${block.thinking.replace(/\n/g, "\n│ ")}\n└────────────────────────────────────\n\n`
+          );
         } else if (block.type === "tool_use") {
-          const input = JSON.stringify(block.input ?? {});
-          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${input.slice(0, 200)})`);
-          this.emitThinking(agent.id, agent.name, `── ${block.name} ──\n${input}\n`);
+          const input = block.input ?? {};
+          const inputFormatted = JSON.stringify(input, null, 2);
+          console.log(`[${logPrefix}] ${agent.name} → ${block.name}(${JSON.stringify(input).slice(0, 200)})`);
+          this.emitThinking(agent.id, agent.name,
+            `▶ TOOL: ${block.name}\n${inputFormatted}\n\n`
+          );
         } else if (block.type === "text" && block.text) {
           console.log(`[${logPrefix}] ${agent.name} says: ${block.text.slice(0, 150)}`);
-          this.emitThinking(agent.id, agent.name, `📢 ${block.text}\n\n`);
+          this.emitThinking(agent.id, agent.name,
+            `💬 TEXT (shared with team):\n${block.text}\n\n`
+          );
           textContent = block.text;
         }
       }
     }
 
+    // ── user message: tool results ──
     if (msg.type === "user" && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
         if (block.type === "tool_result") {
           const r = typeof block.content === "string" ? block.content
             : Array.isArray(block.content) ? block.content.map((c: any) => c.text ?? "").join("") : "";
-          this.emitThinking(agent.id, agent.name, `← ${r}\n`);
+          this.emitThinking(agent.id, agent.name,
+            `◀ RESULT: ${r}\n\n`
+          );
         }
       }
     }
 
-    // Result message — may contain text we haven't seen in assistant blocks
+    // ── result: final agent output (fallback if no assistant text) ──
     if (msg.type === "result" && msg.subtype === "success" && typeof msg.result === "string" && msg.result.length > 0) {
-      // Only use result text if we didn't already capture it from assistant blocks
       if (!textContent) {
         console.log(`[${logPrefix}] ${agent.name} result text: ${msg.result.slice(0, 150)}`);
-        this.emitThinking(agent.id, agent.name, `📢 ${msg.result}\n\n`);
+        this.emitThinking(agent.id, agent.name,
+          `💬 TEXT (shared with team):\n${msg.result}\n\n`
+        );
         textContent = msg.result;
-      } else {
-        console.log(`[${logPrefix}] ${agent.name} result: (already captured from assistant blocks)`);
       }
     } else if (msg.type === "result") {
       console.log(`[${logPrefix}] ${agent.name} result: subtype=${msg.subtype} len=${msg.result?.length ?? 0}`);
+      if (msg.subtype === "error") {
+        this.emitThinking(agent.id, agent.name, `⚠ ERROR: ${msg.error ?? "unknown"}\n\n`);
+      }
     }
 
-    if (msg.type === "error" || msg.subtype === "error") {
+    if (msg.type === "error" || (msg.subtype === "error" && msg.type !== "result")) {
       console.error(`[${logPrefix}] ${agent.name} ERROR:`, JSON.stringify(msg).slice(0, 500));
+      this.emitThinking(agent.id, agent.name, `⚠ ERROR: ${JSON.stringify(msg).slice(0, 300)}\n\n`);
     }
 
     return textContent;
@@ -420,9 +434,11 @@ export class GameOrchestrator {
     const agentDeadline = Date.now() + this.config.agentTurnTimeSec * 1000;
 
     if (isFirstEver) {
-      this.emitThinking(agent.id, agent.name, `══ SYSTEM PROMPT ══\n${(options as any).systemPrompt}\n\n`);
+      this.emitThinking(agent.id, agent.name,
+        `╔══════════════════════════════════╗\n║  SYSTEM PROMPT                   ║\n╚══════════════════════════════════╝\n${(options as any).systemPrompt}\n\n`);
     }
-    this.emitThinking(agent.id, agent.name, `══ TURN ${this.state.turnNumber} ══\n${prompt}\n\n`);
+    this.emitThinking(agent.id, agent.name,
+      `╔══════════════════════════════════╗\n║  TURN ${this.state.turnNumber} — PROMPT                 ║\n╚══════════════════════════════════╝\n${prompt}\n\n`);
 
     let messageCount = 0;
     try {
@@ -484,7 +500,8 @@ export class GameOrchestrator {
       const prompt = buildReflectionPrompt(this.state.winner, agent.team, profile.memory, analysis);
 
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
-      this.emitThinking(agent.id, agent.name, `\n══ REFLECTION ══\n${prompt}\n\n`);
+      this.emitThinking(agent.id, agent.name,
+        `\n╔══════════════════════════════════╗\n║  POST-GAME REFLECTION            ║\n╚══════════════════════════════════╝\n${prompt}\n\n`);
 
       const server = this.createReflectionServer(agent);
       const options = {
@@ -522,7 +539,8 @@ export class GameOrchestrator {
       if (!sessionId) continue;
 
       this.emit({ type: "deliberation:active_agent", payload: { agentId: agent.id, agentName: agent.name } });
-      this.emitThinking(agent.id, agent.name, `\n══ DISCUSSION ══\n${discussionPrompt}\n\n`);
+      this.emitThinking(agent.id, agent.name,
+        `\n╔══════════════════════════════════╗\n║  POST-GAME DISCUSSION            ║\n╚══════════════════════════════════╝\n${discussionPrompt}\n\n`);
 
       const server = this.createReflectionServer(agent);
       const options = {
