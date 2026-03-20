@@ -42,9 +42,9 @@ ${teammates ? `Teammates: ${teammates}` : "Solo."}
 ${personality}
 ${memory ? `\nYOUR MEMORY:\n${memory}\n` : ""}
 HOW TO PLAY:
-- Think deeply in your extended thinking. Keep your spoken messages short (1-2 sentences).
+- Everything you say is shared with your team${isSolo ? "" : "mates"}. Think in your extended thinking, then say what's useful.
 - ONLY the submit_move tool makes a move. Saying "I play e4" in text does nothing — you must call the tool.
-- If you're not ready to commit, just share your thoughts and let the conversation continue.
+- If you're not ready to commit, share your analysis and let the conversation continue.
 ${isSolo ? "" : `- Your teammates can see what you say. Talk to them.`}`;
 
   return p;
@@ -88,7 +88,7 @@ LEGAL MOVES: ${legalMoves.join(", ")}
 CLOCK: ${formatClock(clockRemaining)}
 ${gameLog}${msgSection}
 
-1-2 sentences only. To make a move, call submit_move. Talking about a move does NOT play it.`;
+To make a move, call submit_move. Talking about a move does NOT play it.`;
 }
 
 function buildReflectionPrompt(
